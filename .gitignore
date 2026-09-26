@@ -1,0 +1,14 @@
+# Téléchargements et profils navigateur (cookies Cloudflare)
+downloads/
+.profile/
+
+# Captures de recherche : peuvent contenir des cookies / URLs signées
+research/
+*.har
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
