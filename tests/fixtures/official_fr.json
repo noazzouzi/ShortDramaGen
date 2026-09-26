@@ -1,0 +1,71 @@
+{
+ "bookInfo": {
+  "bookId": "41000105199",
+  "bookName": "Qui Est la Véritable Mme Lafont ?",
+  "cover": "https://thwztchapter.dramaboxdb.com/data/cppartner/4x1/41x0/410x0/41000111625/41000111625.jpg@w=360&h=640",
+  "introduction": "Coralie Guillot et Jérôme Lafont vivent une aventure inattendue. Après cela, Jérôme prend le collier en flocons de neige de Coralie et demande à ses subordonnés de la ramener chez lui, en lui offrant un traitement digne de sa future femme. Cependant, une erreur se produit et c’est Diane Guillot qui est ramenée à sa place. Une guerre de l’identité est sur le point d’éclater.",
+  "chapterCount": 62,
+  "language": "FRENCH",
+  "bookNameEn": "One-Night-to-Forever",
+  "bookNameLower": "one-night-to-forever"
+ },
+ "chapterList": [
+  {
+   "id": "577159336",
+   "name": "第一集",
+   "index": 0,
+   "indexStr": "001",
+   "unlock": true,
+   "mp4": "https://hwvideoseo.dramaboxdb.com/33/5x2/52x6/526x1/52611100014/586357933_1/586357933.720p.narrowv3.mp4?Expires=1790535600&Signature=FAKE&Key-Pair-Id=FAKE",
+   "m3u8Url": "https://hwzthls.dramaboxdb.com/33/5x2/52x6/526x1/52611100014/586357933_1/m3u8/586357933.720p.m3u8?Expires=1790535600&Signature=FAKE&Key-Pair-Id=FAKE",
+   "m3u8Flag": true,
+   "cover": "https://thwztvideo.dramaboxdb.com/33/5x2/52x6/526x1/52611100014/586357933_1/586357933.mp4.jpg@w=100&h=135",
+   "utime": "2025-01-19",
+   "chapterPrice": 0,
+   "duration": 153118,
+   "new": false
+  },
+  {
+   "id": "577159337",
+   "name": "第二集",
+   "index": 1,
+   "indexStr": "002",
+   "unlock": true,
+   "mp4": "https://hwvideoseo.dramaboxdb.com/43/5x2/52x6/526x1/52611100014/586357934_1/586357934.720p.narrowv3.mp4?Expires=1790535600&Signature=FAKE&Key-Pair-Id=FAKE",
+   "m3u8Url": "https://hwzthls.dramaboxdb.com/43/5x2/52x6/526x1/52611100014/586357934_1/m3u8/586357934.720p.m3u8?Expires=1790535600&Signature=FAKE&Key-Pair-Id=FAKE",
+   "m3u8Flag": true,
+   "cover": "https://thwztvideo.dramaboxdb.com/43/5x2/52x6/526x1/52611100014/586357934_1/586357934.mp4.jpg@w=100&h=135",
+   "utime": "2025-01-19",
+   "chapterPrice": 0,
+   "duration": 110131,
+   "new": false
+  },
+  {
+   "id": "577159363",
+   "name": "第二十八集",
+   "index": 27,
+   "indexStr": "028",
+   "unlock": false,
+   "cover": "https://thwztvideo.dramaboxdb.com/06/5x2/52x6/526x1/52611100014/586357960_1/586357960.mp4.jpg@w=100&h=135",
+   "utime": "2025-01-19",
+   "chapterPrice": 0,
+   "duration": 79134,
+   "new": false
+  }
+ ],
+ "languages": [
+  "ko",
+  "th",
+  "in",
+  "ja",
+  "en",
+  "fr",
+  "es"
+ ],
+ "locale": "fr",
+ "sourceBookId": "41000111625",
+ "tabData": [
+  "1-50",
+  "51-62"
+ ]
+}

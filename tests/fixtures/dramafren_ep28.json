@@ -1,0 +1,26 @@
+{
+ "ok": true,
+ "videoUrl": "https://hwztakavideoto.dramaboxdb.com/00000000000000000000000000000000/6ad5b861/36/9x9/99x1/991x5/99150100014/577159363_1/577159363.720p.narrowv3.mp4",
+ "subtitles": [],
+ "qualities": [
+  {
+   "quality": "Server 1 720p",
+   "url": "https://hwztakavideoto.dramaboxdb.com/00000000000000000000000000000000/6ad5b861/36/9x9/99x1/991x5/99150100014/577159363_1/577159363.720p.narrowv3.mp4"
+  },
+  {
+   "quality": "Server 1 1080p",
+   "url": "https://hwztakavideoto.dramaboxdb.com/00000000000000000000000000000000/6ad5b861/36/9x9/99x1/991x5/99150100014/577159363_1/577159363.1080p.nav2.mp4"
+  },
+  {
+   "quality": "Server 1 540p",
+   "url": "https://hwztakavideoto.dramaboxdb.com/00000000000000000000000000000000/6ad5b861/36/9x9/99x1/991x5/99150100014/577159363_1/577159363.540p.narrowv2.mp4"
+  }
+ ],
+ "activeVideoServer": 1,
+ "sourceLabel": "Video Isolated Server 1",
+ "isAuto": false,
+ "serverBadgeText": "Server 1",
+ "serverBadgeClass": "sv1",
+ "isHls": false,
+ "nativeNoCors": false
+}

@@ -1,258 +1,209 @@
 # 02 — Architecture
 
+> Version 2, après analyse des captures HAR. La découverte de l'API
+> `get_video` (non protégée) supprime le besoin d'un navigateur piloté :
+> **tout se fait en simples requêtes HTTP**, depuis n'importe quelle machine.
+
 ## 1. Principe directeur : séparer le *quoi*, le *où* et le *comment*
 
-| Couche | Question | Source | Stabilité |
+| Couche | Question | Source | Module |
 |---|---|---|---|
-| **Métadonnées** | *Quoi* télécharger ? (épisodes, IDs, durées) | Site officiel (JSON Next.js) | Haute |
-| **Résolution** | *Où* est le fichier ? (URL signée valide) | Plugins : officiel (ép. 1-10), dramafren (tous) | **Faible** (Cloudflare, changements de site) |
-| **Téléchargement** | *Comment* le récupérer de façon fiable ? | CDN direct (HTTP Range) | Haute |
+| **Métadonnées** | *Quoi* télécharger ? (épisodes, IDs, durées, langue) | Site officiel (`__NEXT_DATA__`) | `official.py` |
+| **Résolution** | *Où* est le fichier ? (URL signée valide) | API dramafren, puis MP4 officiel (ép. 1-10) en secours | `dramafren.py`, `pipeline.resolve_episode` |
+| **Téléchargement** | *Comment* le récupérer de façon fiable ? | CDN direct (HTTP Range) | `download.py`, `mp4.py` |
 
-La partie fragile, dramafren, est **isolée derrière une interface** : si le site
-change ou disparaît, on remplace un plugin sans toucher au reste.
+La source fragile (dramafren) reste isolée dans un module. Si elle change, on
+ne touche qu'à ce fichier.
 
 ## 2. Vue d'ensemble
 
 ```mermaid
 flowchart LR
-    IN[/"URL ou bookId"/] --> P[InputParser]
-    P -->|BookRef| M[MetadataProvider<br/>dramaboxdb.com JSON]
-    M -->|Series + Episodes| R{ResolverChain}
-    R --> R1[OfficialFreeResolver<br/>ép. 1-10]
-    R --> R2[DramaFrenResolver<br/>navigateur piloté]
-    R1 & R2 -->|MediaUrl| V[UrlValidator<br/>formule de chemin + expiration]
-    V --> D[DownloadManager<br/>Range, reprise, N parallèles]
-    D --> C[IntegrityCheck<br/>taille + durée ffprobe]
-    C --> S[(Store<br/>manifest.json + MP4)]
-    S -.-> PP[PostProcess<br/>concat, sous-titres, ShortDramaGen]
+    IN[/"URL ou bookId"/] --> P[inputs.parse_input]
+    P -->|BookRef| M[official.fetch_series<br/>dramaboxdb.com]
+    M -->|Series: épisodes, durées,<br/>bookId de la langue| R[resolve_episode]
+    M -. 404 .-> PR[probe_series<br/>via dramafren]
+    PR --> R
+    R --> R1[dramafren.get_video<br/>540p / 720p / 1080p]
+    R --> R2[MP4 officiel<br/>ép. 1-10, 720p]
+    R1 & R2 --> V[cdn.matches_episode<br/>chemin = bon épisode ?]
+    V --> D[download<br/>Range, .part par variante]
+    D --> C[check_duration<br/>mvhd = durée officielle ±1 s]
+    C --> S[(downloads/…/E001.mp4<br/>manifest.json)]
 ```
 
 ## 3. Composants
 
-### 3.1 `InputParser`
-Normalise n'importe quelle entrée en `BookRef(platform, book_id, lang)` :
-URL officielle (série ou épisode, avec ou sans locale), `dramabox.com/drama/…`,
-lien de partage de l'app, URL dramafren, ou `bookId` brut. Pure fonction avec
-tests unitaires sur chaque format.
+### 3.1 `inputs.py`
+`parse_input(texte) -> BookRef(book_id, lang)`. Formats acceptés : URL
+officielle (série ou épisode, avec ou sans locale), `dramabox.com/drama/…`,
+lien de partage `dramaboxapp.com`, URL dramafren (le `lang` y est ignoré, car
+il ne change pas la vidéo), paramètre `bookId=` ou identifiant brut. Seule la
+locale d'une URL officielle (`/fr/movie/…`) est retenue comme langue.
 
-### 3.2 `MetadataProvider` — `DramaBoxOfficialProvider`
+### 3.2 `official.py`
 1. `GET https://www.dramaboxdb.com/{locale}/movie/{bookId}/` (redirige vers le
-   bon slug) et parse de `__NEXT_DATA__`.
-2. Variante plus légère : `GET /_next/data/{buildId}/{locale}/movie/{bookId}/{slug}.json`,
-   avec repli sur le HTML si `buildId` a changé (404).
-3. Produit `Series` (titre, synopsis, cover, tags, langue, `source_book_id`)
-   et la liste complète des `Episode` (`chapter_id`, `index`, `duration_ms`,
-   `cover`, `free_url` si `unlock`).
+   bon slug ; pas de préfixe pour `en`).
+2. Parse de `__NEXT_DATA__` → `pageProps` (le HTML est plus stable que
+   `/_next/data/{buildId}/…`, dont le `buildId` change à chaque déploiement).
+3. `Series` :
+   - titre ;
+   - `source_book_id` (livre de la langue choisie) ;
+   - langues disponibles ;
+   - pour chaque `Episode` : `chapter_id` (ID d'origine), `media_id` (ID
+     réellement présent dans les chemins CDN, lu dans l'URL de la cover),
+     `duration_ms`, `free_url`.
+4. `404` ou page sans `bookInfo` → `SeriesNotFound`. Le pipeline bascule alors
+   en **mode sonde** : il interroge dramafren épisode par épisode jusqu'au
+   premier `ok: false`, sans contrôle de durée.
 
-Sans navigateur ni Cloudflare, en une seule requête. **Le nombre d'épisodes
-officiel sert de référence** pour vérifier qu'on n'en oublie aucun.
+### 3.3 `dramafren.py`
+`get_video(book_id, ep)` → `[VideoSource]`, meilleure qualité d'abord.
+- Endpoint principal `cdn-dramabox…`, puis secours `cdn-dramaboxv2…` (comme
+  le site).
+- En-têtes `Origin`/`Referer` identiques au navigateur. Aucun cookie.
+- `lang=en` et `sv=1` sont fixes (voir [étude §2.2](01-etude-technique.md#22-lapi-vidéo-trouvée-grâce-aux-captures-har-)).
+- Les appels sont **espacés de 0,3 s** (`RateLimiter`), même avec plusieurs
+  téléchargements en parallèle.
 
-### 3.3 `Resolver` (interface + chaîne)
-
-```python
-class Resolver(Protocol):
-    name: str
-    def supports(self, series: Series) -> bool: ...
-    async def resolve(self, series: Series, episodes: list[Episode]) -> dict[str, MediaUrl]: ...
-```
-
-La `ResolverChain` essaie les resolvers dans l'ordre et ne passe au suivant que
-pour les épisodes encore non résolus.
-
-| Resolver | Couvre | Mécanisme | Expiration URL |
-|---|---|---|---|
-| `OfficialFreeResolver` | ép. 1-10 | `chapterList[].mp4`, déjà dans les métadonnées | ~24 h |
-| `DramaFrenResolver` | tous | Navigateur piloté (voir 3.4) | ~3 semaines |
-| `ManualListResolver` | tous | Fichier JSON/TXT d'URLs fourni (userscript, copier-coller) | variable |
-
-### 3.4 `DramaFrenResolver` : la pièce délicate
-
-Contrainte : Cloudflare Turnstile interactif. **On ne cherche pas à le
-contourner** : on réutilise une session humaine légitime. Trois modes sont
-possibles, du plus automatique au plus manuel :
-
-**Mode A — Profil Playwright persistant (recommandé pour démarrer)**
-- `chromium.launch_persistent_context(user_data_dir=".profile/dramafren", headless=False)`.
-- Au premier lancement, la fenêtre s'ouvre et tu coches la case Cloudflare une
-  fois. Le cookie `cf_clearance` est conservé dans le profil (lié à l'IP et au
-  User-Agent).
-- Le resolver ouvre la page détail puis, pour chaque épisode :
-  - **Stratégie générique (V1)** : clic sur « Ep N » et interception réseau
-    `page.on("response")` des URLs `dramaboxdb.com/…\.(mp4|m3u8)`. Elle ne
-    dépend pas du DOM exact et correspond à ce que tu fais dans DevTools.
-  - **Stratégie optimisée (V2)** : une fois l'endpoint interne identifié via
-    le HAR, appel direct depuis le contexte de la page
-    (`page.evaluate(fetch(...))`), avec les mêmes cookies et la même origine.
-    C'est plus rapide et on n'a pas besoin de lancer la lecture.
-- Chaque URL capturée passe par l'`UrlValidator` (bon `chapterId` et bon
-  `bookId` inversé dans le chemin). Sinon, on la rejette et on réessaie.
-
-**Mode B — Attacher ton vrai Chrome (CDP)**
-- Tu lances Chrome avec `--remote-debugging-port=9222 --user-data-dir=…`, puis
-  `chromium.connect_over_cdp("http://localhost:9222")`.
-- L'empreinte est 100 % humaine, avec la même logique que le mode A.
-
-**Mode C — Userscript / bookmarklet (repli sans automatisation)**
-- Un script (Tampermonkey ou bookmarklet) exécuté sur la page détail dramafren
-  parcourt les épisodes en `fetch` même-origine et exporte un `links.json`.
-- Ensuite : `sdg download links.json`, via le `ManualListResolver`.
-- Aucun risque de détection de bot, mais une action manuelle par série.
-
-> Toutes ces options supposent que l'outil tourne **sur ta machine** (IP
-> résidentielle). Sur un serveur ou dans le cloud, dramafren bloquera (vérifié).
-
-**Politesse** : 1 épisode à la fois côté dramafren, pause aléatoire de 1 à 3 s,
-cache des URLs déjà résolues (valables environ 3 semaines).
-
-### 3.5 `UrlValidator` / `cdn.py`
-- `expected_path(book_id, chapter_id)` : formule déterministe
+### 3.4 `cdn.py`
+- `expected_path(book_id, media_id)` : formule déterministe
   ([étude §4](01-etude-technique.md#4-le-chemin-cdn-est-déterministe-)).
-- `expires_at(url)` gère deux cas :
-  - Akamai : second segment hexadécimal du chemin.
-  - CloudFront : paramètre `Expires`.
-- `is_valid_for(url, episode)` : chemin conforme et non expiré (marge de 10
-  min).
+- `matches_episode(url, …)` : **toute URL qui ne pointe pas vers le bon
+  épisode est écartée** (protection contre les inversions d'épisodes).
+- `expires_at(url)` : jeton Akamai (segment hexadécimal) ou CloudFront
+  (`Expires`), conservé dans le manifest.
 
-### 3.6 `DownloadManager`
-- Client `httpx` asynchrone, **3 téléchargements en parallèle** par défaut
-  (paramétrable).
-- Écriture dans `E028.mp4.part`, reprise via `Range: bytes={taille}-`, puis
-  renommage atomique.
-- Retries avec backoff exponentiel. Sur `403` ou URL expirée : **re-résolution
-  automatique** de l'épisode puis nouvelle tentative.
-- MP4 : téléchargement direct. HLS : `ffmpeg -i playlist.m3u8 -c copy`, en
-  secours seulement.
+### 3.5 `download.py` + `mp4.py`
+- Écriture dans `E028.<variante>.part` (ex.
+  `E028.577159363.1080p.nav2.mp4.part`). Un `.part` par variante, pour ne
+  jamais reprendre un fichier 1080p avec les octets d'un 720p.
+- Reprise par `Range: bytes=N-` ; `200` au lieu de `206` → on repart de zéro ;
+  `416` → `.part` obsolète supprimé.
+- `401/403/404/410` → `UrlRejected` : le pipeline passe à la source
+  suivante, puis re-résout.
+- Contrôles, **sans ffmpeg** :
+  - la taille reçue doit valoir `Content-Length` (ou le total de
+    `Content-Range`) ;
+  - la durée `mvhd` du MP4 doit égaler la durée officielle à ±1 s.
+- Renommage atomique `.part` → `E028.mp4`, puis nettoyage des autres `.part`
+  de l'épisode.
 
-### 3.7 `IntegrityCheck`
-- La taille reçue doit être égale à `Content-Length`.
-- `ffprobe` : durée à ±0,5 s de `duration_ms` et flux vidéo lisible.
-- En cas d'échec, suppression du fichier et nouvelle tentative (max 3), puis
-  statut `failed` dans le manifest.
-
-### 3.8 `Store` : manifest et arborescence
+### 3.6 `pipeline.py`
+Pour chaque épisode, dans un pool de *N* threads (3 par défaut) :
 
 ```
-downloads/
-└── 41000105199-one-night-to-forever/
-    ├── manifest.json
-    ├── cover.jpg
-    ├── E001.mp4
-    ├── …
-    └── E062.mp4
+fichier E0xx.mp4 présent et durée OK ?  → « déjà présent »
+sinon, jusqu'à 3 tentatives :
+    sources = dramafren (filtrées par cdn.matches_episode) + MP4 officiel si gratuit
+    pour chaque source (qualité demandée d'abord, puis les autres) :
+        téléchargement → OK : status=done, fin
+        URL refusée / fichier incorrect → source suivante
+        erreur réseau → pause (2 s, 4 s) puis nouvelle résolution
+→ status=failed + message, sans bloquer les autres épisodes
 ```
+
+### 3.7 `manifest.py`
+`downloads/{bookId}-{slug}[-{lang}]/manifest.json`, réécrit atomiquement à
+chaque changement d'état :
 
 ```jsonc
-// manifest.json
 {
-  "platform": "dramabox",
-  "book_id": "41000105199",
-  "title": "One Night to Forever",
-  "lang": "en",
-  "episode_count": 62,
-  "created_at": "2026-09-26T19:30:00Z",
+  "platform": "dramabox", "book_id": "41000105199", "source_book_id": "41000111625",
+  "lang": "fr", "title": "Qui Est la Véritable Mme Lafont ?", "episode_count": 62,
   "episodes": [
-    { "index": 28, "chapter_id": "577159363", "duration_ms": 79134,
-      "status": "done",            // pending | resolved | downloading | done | failed
-      "resolver": "dramafren",
-      "url_expires_at": "2026-10-19T06:27:45Z",
-      "file": "E028.mp4", "bytes": 6902326 }
+    { "number": 28, "chapter_id": "577159363", "media_id": "586357960", "duration_ms": 79134,
+      "status": "done", "quality": "1080p", "origin": "dramafren",
+      "url": "https://hwztakavideoto…", "url_expires_at": "2026-10-19T06:27:45+00:00",
+      "file": "E028.mp4", "bytes": 10149996 }
   ]
 }
 ```
 
-Le traitement est **idempotent** : relancer la commande saute les épisodes
-`done` et reprend les autres. Les URLs signées ne sont pas des secrets, mais
-elles expirent ; on les garde pour le debug.
+Le traitement est idempotent : relancer la même commande ne fait que ce qui
+manque, ou ce qui a échoué.
 
-### 3.9 CLI
+### 3.8 `cli.py`
 
 ```bash
-sdg info    <url>                         # métadonnées + nombre d'épisodes, aucun téléchargement
-sdg fetch   <url> [--lang en] [--episodes 1-20,35] [--out downloads/] [--jobs 3]
-            [--resolver auto|official|dramafren|manual] [--browser playwright|cdp]
-sdg resolve <url> --export links.json     # résout seulement (utilisable avec aria2c, IDM…)
-sdg download links.json                   # télécharge une liste déjà résolue
-sdg verify  downloads/41000105199-…/      # recontrôle l'intégrité
-sdg concat  downloads/41000105199-…/      # (option) un seul fichier « film »
+sdg info  <url> [--lang fr]
+sdg fetch <url> [--lang fr] [-q best|1080p|720p|540p] [-e 1-10,28,40-] [-o downloads] [-j 3]
+sdg links <url> [--lang fr] [-q ...] [-e ...] [--json]   # URLs pour aria2c / IDM
 ```
+
+Codes de sortie : `0` = tout OK, `1` = au moins un échec (relancer pour
+réessayer), `2` = entrée invalide, `130` = interrompu (Ctrl+C, reprise
+possible).
 
 ## 4. Séquence d'un `sdg fetch`
 
 ```mermaid
 sequenceDiagram
     actor U as Utilisateur
-    participant CLI
-    participant Meta as OfficialProvider
-    participant Chain as ResolverChain
-    participant DF as DramaFrenResolver (Chromium)
-    participant CDN
-    U->>CLI: sdg fetch https://…/movie/41000105199/…
-    CLI->>Meta: get_series(41000105199, en)
-    Meta-->>CLI: 62 épisodes (10 avec free_url)
-    CLI->>Chain: resolve(ép. manquants dans manifest)
-    Chain->>Chain: OfficialFree → ép. 1-10
-    Chain->>DF: ép. 11-62
-    DF->>U: (1er lancement) coche Cloudflare dans la fenêtre
-    loop chaque épisode
-        DF->>DF: clic "Ep N" / fetch interne
-        DF-->>Chain: URL capturée → UrlValidator
-    end
-    loop 3 en parallèle
-        CLI->>CDN: GET (Range)
+    participant CLI as sdg fetch
+    participant Off as dramaboxdb.com
+    participant DF as API dramafren
+    participant CDN as CDN Akamai
+    U->>CLI: sdg fetch <url> --lang fr
+    CLI->>Off: GET /fr/movie/41000105199/
+    Off-->>CLI: 62 épisodes, durées, sourceBookId=41000111625
+    par 3 workers
+        CLI->>DF: get_video id=41000111625 ep=N (espacés de 0,3 s)
+        DF-->>CLI: URLs 1080p / 720p / 540p
+        CLI->>CLI: chemin == épisode N ?
+        CLI->>CDN: GET (Range si .part)
         CDN-->>CLI: MP4
-        CLI->>CLI: ffprobe durée == duration_ms ?
+        CLI->>CLI: durée mvhd == durée officielle ?
     end
-    CLI-->>U: 62/62 OK → downloads/41000105199-…/
+    CLI-->>U: 62/62 OK
 ```
 
-## 5. Stack technique proposée
+## 5. Choix techniques
 
 | Besoin | Choix | Pourquoi |
 |---|---|---|
-| Langage | **Python 3.12** | Écosystème vidéo et IA (ffmpeg, Whisper, montage) pour la suite « Gen » |
-| HTTP | `httpx` (async, HTTP/2) | Range, streaming, timeouts fins |
-| Navigateur | `playwright` (Python) | Profil persistant, interception réseau, CDP |
-| Modèles | `pydantic` v2 | Validation des JSON officiels et du manifest |
-| CLI | `typer` + `rich` | Sous-commandes, barres de progression |
-| Vidéo | `ffmpeg` / `ffprobe` | Contrôle de durée, HLS, concaténation |
-| Tests | `pytest` + fixtures JSON/HAR enregistrées | Tests hors-ligne ; détection des changements de site |
+| Langage | Python ≥ 3.10 | Simple, multiplateforme, bon pour la suite vidéo |
+| Dépendances | **Aucune** (bibliothèque standard) | `python -m shortdramagen` marche sans `pip install`, y compris sous Windows |
+| HTTP | `urllib` derrière une petite classe `Http` | Proxy et CA système gérés ; remplaçable par un faux dans les tests |
+| Parallélisme | `ThreadPoolExecutor` | Téléchargements limités par le réseau, pas par le CPU |
+| Contrôle vidéo | Lecture de la boîte `mvhd` en Python pur | Pas besoin d'installer ffmpeg |
+| Tests | `unittest` + fixtures JSON anonymisées + faux réseau | 100 % hors ligne, en 30 ms |
 
-Alternative crédible : TypeScript/Node (Playwright y est natif). Elle
-compliquerait la partie traitement vidéo et IA prévue ensuite.
+Ce qui avait été envisagé en V1 (httpx, typer, Playwright) n'est plus
+nécessaire. Le navigateur piloté reste un **plan B** documenté, si dramafren
+venait à protéger son API (voir [03](03-brainstorm-et-roadmap.md)).
 
-## 6. Arborescence du code (cible)
+## 6. Arborescence
 
 ```
 shortdramagen/
-├── cli.py
-├── models.py              # BookRef, Series, Episode, MediaUrl, Manifest
-├── inputs.py              # InputParser
-├── cdn.py                 # formule de chemin, expiration, validation
-├── providers/
-│   └── dramabox_official.py
-├── resolvers/
-│   ├── base.py            # Protocol + ResolverChain
-│   ├── official_free.py
-│   ├── dramafren.py       # modes playwright / cdp
-│   └── manual_list.py
-├── download/
-│   ├── manager.py
-│   └── integrity.py
-├── store/manifest.py
-└── postprocess/ffmpeg.py
+├── __main__.py      # python -m shortdramagen
+├── cli.py           # sous-commandes info / fetch / links
+├── models.py        # BookRef, Series, Episode, VideoSource
+├── inputs.py        # URL -> BookRef
+├── official.py      # métadonnées dramaboxdb.com
+├── dramafren.py     # API get_video
+├── cdn.py           # formule de chemin, expiration
+├── http.py          # client urllib (retries sur erreurs réseau et 5xx)
+├── download.py      # téléchargement reprenable + contrôles
+├── mp4.py           # durée d'un MP4
+├── manifest.py      # état par série
+└── pipeline.py      # orchestration
 tests/
-├── fixtures/              # __NEXT_DATA__ enregistré, HAR dramafren nettoyé
+├── fakes.py         # FakeHttp, générateur de MP4 minimal
+├── fixtures/        # extraits réels anonymisés (site officiel EN/FR, réponse get_video)
 └── test_*.py
-userscripts/
-└── dramafren-export.user.js   # mode C
 ```
 
 ## 7. Extensibilité multi-plateformes
 
-`platform` est une dimension de premier niveau (`BookRef.platform`). Chaque
-plateforme (ReelShort, GoodShort, ShortMax…) apporte :
-- son `MetadataProvider` (site officiel, s'il en existe un exploitable),
-- sa fonction `cdn` (validation d'URL),
-- sa configuration de resolver dramafren (sous-domaine, sélecteurs, endpoint).
+dramafren expose le même schéma pour d'autres plateformes (sous-domaines
+`dramapops.`, `reelshort.`…). Il est probable que chacune ait son
+`cdn-<plateforme>.dramafren.org/index.php?action=get_video`, mais ce n'est
+pas vérifié. Pour en ajouter une, il faudrait :
+- un module de métadonnées (ou le mode sonde si aucun site officiel n'est
+  exploitable) ;
+- l'endpoint dramafren correspondant ;
+- la règle de validation d'URL propre à son CDN.
 
-Download, store, intégrité et CLI sont partagés.
+`download`, `manifest`, `mp4` et la CLI restent partagés.

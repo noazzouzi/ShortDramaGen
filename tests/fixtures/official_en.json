@@ -1,0 +1,71 @@
+{
+ "bookInfo": {
+  "bookId": "41000105199",
+  "bookName": "One Night to Forever",
+  "cover": "https://thwztchapter.dramaboxdb.com/data/cppartner/4x1/41x0/410x0/41000105199/41000105199.jpg@w=360&h=640",
+  "introduction": "After a one-night stand with Layla Reed, Miles Zeller takes her snowflake necklace and instructs his men to treat her as his future wife. However, his subordinate mistakenly identifies Lana Reed as Layla, sparking a competition between the real Layla and the impostor for the title of Mrs. Zeller.",
+  "chapterCount": 62,
+  "language": "ENGLISH",
+  "bookNameEn": "One-Night-to-Forever",
+  "bookNameLower": "one-night-to-forever"
+ },
+ "chapterList": [
+  {
+   "id": "577159336",
+   "name": "第一集",
+   "index": 0,
+   "indexStr": "001",
+   "unlock": true,
+   "mp4": "https://hwvideoseo.dramaboxdb.com/63/9x9/99x1/991x5/99150100014/577159336_1/577159336.720p.narrowv3.mp4?Expires=1790535600&Signature=FAKE&Key-Pair-Id=FAKE",
+   "m3u8Url": "https://hwzthls.dramaboxdb.com/63/9x9/99x1/991x5/99150100014/577159336_1/m3u8/577159336.720p.m3u8?Expires=1790535600&Signature=FAKE&Key-Pair-Id=FAKE",
+   "m3u8Flag": true,
+   "cover": "https://thwztvideo.dramaboxdb.com/63/9x9/99x1/991x5/99150100014/577159336_1/577159336.mp4.jpg@w=100&h=135",
+   "utime": "2026-06-28",
+   "chapterPrice": 0,
+   "duration": 153118,
+   "new": false
+  },
+  {
+   "id": "577159337",
+   "name": "第二集",
+   "index": 1,
+   "indexStr": "002",
+   "unlock": true,
+   "mp4": "https://hwvideoseo.dramaboxdb.com/73/9x9/99x1/991x5/99150100014/577159337_1/577159337.720p.narrowv3.mp4?Expires=1790535600&Signature=FAKE&Key-Pair-Id=FAKE",
+   "m3u8Url": "https://hwzthls.dramaboxdb.com/73/9x9/99x1/991x5/99150100014/577159337_1/m3u8/577159337.720p.m3u8?Expires=1790535600&Signature=FAKE&Key-Pair-Id=FAKE",
+   "m3u8Flag": true,
+   "cover": "https://thwztvideo.dramaboxdb.com/73/9x9/99x1/991x5/99150100014/577159337_1/577159337.mp4.jpg@w=100&h=135",
+   "utime": "2026-06-28",
+   "chapterPrice": 0,
+   "duration": 110131,
+   "new": false
+  },
+  {
+   "id": "577159363",
+   "name": "第二十八集",
+   "index": 27,
+   "indexStr": "028",
+   "unlock": false,
+   "cover": "https://thwztvideo.dramaboxdb.com/36/9x9/99x1/991x5/99150100014/577159363_1/577159363.mp4.jpg@w=100&h=135",
+   "utime": "2026-06-28",
+   "chapterPrice": 0,
+   "duration": 79134,
+   "new": false
+  }
+ ],
+ "languages": [
+  "ko",
+  "th",
+  "in",
+  "ja",
+  "en",
+  "fr",
+  "es"
+ ],
+ "locale": "en",
+ "sourceBookId": "41000105199",
+ "tabData": [
+  "1-50",
+  "51-62"
+ ]
+}

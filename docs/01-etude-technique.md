@@ -2,38 +2,71 @@
 
 > Constats vérifiés le **2026-09-26** sur la série *One Night to Forever*
 > (`bookId = 41000105199`, 62 épisodes). Tout ce qui est marqué ✅ a été testé ;
-> ce qui est marqué ❓ reste à confirmer.
+> ce qui est marqué ❓ reste à confirmer. Les captures HAR fournies ont permis
+> de trouver l'API décrite au §2.2.
 
 ## 1. Les trois acteurs
 
 | Acteur | Rôle pour nous | Protection |
 |---|---|---|
-| **dramabox.dramafren.org** | Fournit une URL vidéo pour **tous** les épisodes | Cloudflare *Managed Challenge* / Turnstile |
+| **API dramafren** `cdn-dramabox.dramafren.org` | URL vidéo signée pour **tous** les épisodes, en 540p, 720p et 1080p | **Aucune** (ni challenge, ni cookie) |
+| Pages dramafren `dramabox.dramafren.org` | Interface web (inutile pour nous) | Cloudflare *Managed Challenge* / Turnstile |
 | **www.dramaboxdb.com** (site officiel) | Métadonnées complètes + MP4 des **10 premiers** épisodes | Aucune (Next.js statique) |
 | **CDN vidéo `*.dramaboxdb.com`** | Sert les fichiers MP4 / HLS | URL signée avec expiration, rien d'autre |
 
 ---
 
-## 2. dramafren (`dramabox.dramafren.org`)
+## 2. dramafren
 
-- Site PHP : `index.php?page=detail&id={bookId}&lang={lang}`. Le paramètre `id`
-  **est le `bookId` DramaBox** : pas besoin de mapping.
+### 2.1 Les pages HTML (`dramabox.dramafren.org`)
+
+- Site PHP : `index.php?page=detail&id={bookId}&lang={lang}` et
+  `index.php?page=watch&id={bookId}&ep={n}&lang={lang}&slug={slug}&sv={1|2|3}`.
+  Le paramètre `id` **est le `bookId` DramaBox**.
 - ✅ **Protégé par Cloudflare** (`cf-mitigated: challenge`, `cType: 'interactive'`) :
   - `curl` → `403` + page « Just a moment… ».
   - Chromium headless (Playwright) depuis une IP de datacenter → bloqué
     indéfiniment sur la case « Vérifiez que vous êtes humain ».
   - Depuis ton Chrome (IP résidentielle, vrai profil) → ça passe.
-- ❓ **Mécanisme interne inconnu** : comment un clic sur « Ep 28 » produit l'URL
-  MP4 (page `watch`, appel XHR/`fetch` vers une API JSON, URL déjà présente dans
-  le HTML…). Impossible à observer depuis un serveur à cause de Cloudflare : il
-  faut une capture HAR depuis ton navigateur (voir
-  [03 — Brainstorm, §5](03-brainstorm-et-roadmap.md#5-action-demandée--capture-har)).
 - Le menu liste 20+ plateformes (GoodShort, ReelShort, ShortMax, NetShort,
-  FlickReels…) sur des sous-domaines du même modèle → l'architecture doit
-  prévoir **plusieurs plateformes**, même si on commence par DramaBox.
-- ❓ `lang=fr` sur dramafren a renvoyé la vidéo de la **version originale**
-  (chemin `99150100014`, voir §4), pas la version doublée française. Le paramètre
-  semble ne concerner que l'interface ou les sous-titres.
+  FlickReels…) sur des sous-domaines du même modèle.
+
+### 2.2 L'API vidéo (trouvée grâce aux captures HAR) ✅
+
+La page `watch` ne contient pas l'URL : son JavaScript appelle une API JSON
+**sur un autre sous-domaine, qui n'est pas derrière le challenge Cloudflare** :
+
+```
+GET https://cdn-dramabox.dramafren.org/index.php?action=get_video&id={bookId}&ep={n}&lang={lang}&sv=1
+    (le site essaie ensuite https://cdn-dramaboxv2.dramafren.org/... en secours, timeout 10 s)
+```
+
+```jsonc
+{
+  "ok": true,
+  "videoUrl": "https://hwztakavideoto.dramaboxdb.com/f940aa0c…/6ad5b861/36/…/577159363.720p.narrowv3.mp4",
+  "qualities": [
+    { "quality": "Server 1 720p",  "url": "…/577159363.720p.narrowv3.mp4" },
+    { "quality": "Server 1 1080p", "url": "…/577159363.1080p.nav2.mp4" },   // 10,1 Mo au lieu de 6,9
+    { "quality": "Server 1 540p",  "url": "…/577159363.540p.narrowv2.mp4" }
+  ],
+  "subtitles": [], "isHls": false, "activeVideoServer": 1
+}
+```
+
+- ✅ **Aucun cookie** ni jeton : la requête du navigateur (HAR) n'en envoie pas,
+  et `curl` seul obtient la même réponse. `Access-Control-Allow-Origin: *`,
+  cache de 5 min côté Cloudflare.
+- ✅ **Trois qualités** : 540p, 720p (celle lue par défaut) et **1080p**.
+- ✅ **`lang` n'a aucun effet** sur la vidéo : `en`, `fr` et `es` renvoient le
+  même fichier (la VO). Les versions doublées ont **leur propre `bookId`**,
+  qu'on passe directement dans `id` (§5) :
+  `id=41000111625` renvoie bien les fichiers de la VF (`52611100014/586357960…`).
+- ✅ `sv=2` et `sv=3` → `{"ok": false, "error": "Video unavailable"}` pour
+  DramaBox. Seul `sv=1` fonctionne.
+- ✅ Épisode hors limites (`ep=63`) → même réponse `ok: false`.
+- Le jeton Akamai des URLs a la **même expiration pour tous les épisodes**
+  (`6ad5b861` = 2026-10-19). dramafren semble donc les générer par lots.
 
 ## 3. Le CDN vidéo (l'URL que tu as capturée)
 
@@ -129,10 +162,15 @@ Next.js en génération statique (`gsp: true`), **sans challenge Cloudflare**.
   (`41000111625`) et d'autres IDs vidéo (`586357933…`). Les `id` de
   `chapterList` restent ceux de la VO.
 
+- ✅ Une langue non proposée (ex. `/de/`) renvoie la VO (`sourceBookId` =
+  `bookId`). Autre version doublée vérifiée : `/es/` → `41000106297`
+  (« Una Noche Para Siempre »).
+- ✅ Série inexistante → `404` (page Next.js `/404` sans `bookInfo`).
+
 **Conclusion** : le site officiel est la **source de vérité pour les
-métadonnées** (titre, synopsis, cover, nombre d'épisodes, IDs, durées) et
-suffit pour les 10 premiers épisodes. dramafren n'est nécessaire que pour
-**résoudre les URLs des épisodes 11+**.
+métadonnées** (titre, synopsis, nombre d'épisodes, IDs, durées) et donne
+le `bookId` de chaque version doublée. L'API dramafren fournit les URLs de
+**tous** les épisodes. Le site officiel sert de secours pour les 10 premiers.
 
 ## 6. Formats d'URL d'entrée à accepter
 
@@ -163,4 +201,6 @@ observés), plus éventuellement une langue.
   `/business`.
 - Choix de conception qui en découle : **on ne forge pas de signatures CDN et on
   ne rétro-ingénie pas l'API privée de l'app**. Le projet automatise uniquement
-  ce que tu fais déjà à la main dans ton navigateur.
+  ce que fait le lecteur dramafren dans ton navigateur (un appel `get_video`
+  par épisode, espacés de 0,3 s).
+- Usage déclaré : défi technique personnel, sans republication.
