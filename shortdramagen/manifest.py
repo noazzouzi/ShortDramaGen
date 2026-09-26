@@ -49,6 +49,19 @@ class Manifest:
         manifest.save()
         return manifest
 
+    @classmethod
+    def load(cls, series_dir: Path) -> "Manifest | None":
+        """Existing manifest as is (no network, no merge with fresh metadata)."""
+        path = series_dir / FILENAME
+        if not path.exists():
+            return None
+        return cls(path, json.loads(path.read_text(encoding="utf-8")))
+
+    def set(self, key: str, value) -> None:
+        with self._lock:
+            self.data[key] = value
+            self._save_locked()
+
     def episode(self, number: int) -> dict:
         for entry in self.data["episodes"]:
             if entry["number"] == number:

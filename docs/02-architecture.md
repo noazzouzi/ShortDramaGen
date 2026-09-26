@@ -30,6 +30,8 @@ flowchart LR
     V --> D[download<br/>Range, .part par variante]
     D --> C[check_duration<br/>mvhd = durée officielle ±1 s]
     C --> S[(downloads/…/E001.mp4<br/>manifest.json)]
+    S -. option --film .-> F[film.build_film<br/>ffmpeg concat sans ré-encodage<br/>+ chapitres]
+    F --> FM[(Titre.mp4)]
 ```
 
 ## 3. Composants
@@ -127,9 +129,67 @@ manque, ou ce qui a échoué.
 
 ```bash
 sdg info  <url> [--lang fr]
-sdg fetch <url> [--lang fr] [-q best|1080p|720p|540p] [-e 1-10,28,40-] [-o downloads] [-j 3]
+sdg fetch <url> [--lang fr] [-q best|1080p|720p|540p] [-e 1-10,28,40-] [-o downloads] [-j 3] [--film]
 sdg links <url> [--lang fr] [-q ...] [-e ...] [--json]   # URLs pour aria2c / IDM
+sdg film  <dossier|url|id> [--lang fr] [-f film.mp4] [--reencode] [--allow-missing] [--no-chapters] [--ffmpeg PATH]
 ```
+
+### 3.9 `film.py` : fusion en un seul film
+
+ffmpeg est trouvé dans cet ordre : `--ffmpeg`, le `PATH`, puis le paquet
+optionnel `imageio-ffmpeg`. Avec `fetch --film`, il est cherché **avant** le
+téléchargement, pour échouer tout de suite s'il manque.
+
+1. **`plan_film`** : liste les `E###.mp4` du manifest et analyse chacun avec
+   `mp4.probe` (Python pur). Refuse s'il manque des épisodes, sauf avec
+   `--allow-missing`.
+2. **Compatibilité** : les épisodes sont regroupés par `format_key`, c'est-à-dire :
+   - codec + résolution + `avcC` (SPS/PPS) ;
+   - codec audio + fréquence + canaux + `AudioSpecificConfig`.
+
+   Les champs de débit de l'`esds`, qui varient d'un épisode à l'autre, sont
+   ignorés : ils n'ont aucun effet sur le décodage. Mesuré sur la série de
+   test : `avcC` identique octet pour octet au sein d'une qualité, différent
+   entre 720p et 1080p.
+3. **Un seul groupe → copie** : `ffmpeg -f concat -c copy -movflags +faststart`.
+   62 épisodes en ~6 s, sans perte.
+4. **Plusieurs groupes → refus explicite**, ou `--reencode` : filtre
+   `concat` avec mise à l'échelle et bandes noires vers le format majoritaire
+   (en durée), libx264 `veryfast` CRF 20 + AAC 128k. Le graphe passe en ligne
+   de commande, ou dans un fichier au-delà de 30 000 caractères (limite
+   Windows).
+5. **Chapitres** : fichier FFMETADATA, un chapitre « Épisode N » par épisode.
+6. **Contrôle** : durée du film = somme attendue (tolérance 1 s + 0,05 s par
+   épisode), puis renommage atomique `.part` → `Titre.mp4`, et entrée `film`
+   dans le manifest.
+
+**Piège évité : les edit lists.** Chaque épisode DramaBox contient des
+paquets audio de *priming* AAC (~0,115 s) placés avant la vidéo, et masqués
+par une edit list. Deux durées coexistent donc :
+- `mvhd` = 153,118 s : l'étendue complète du fichier ;
+- présentation = 153,003 s : ce que montre un lecteur.
+
+Sans précaution, le démuxeur `concat` enchaîne les fichiers sur la durée de
+présentation. Deux conséquences :
+- le priming de l'épisode N+1 **chevauche** la fin de l'audio de l'épisode N
+  (timestamps tassés) ;
+- des chapitres calculés sur `mvhd` dérivent de 0,115 s par épisode, soit
+  **6,9 s** au 62ᵉ (mesuré).
+
+La correction :
+- chaque fichier de la liste reçoit une directive `duration` = `mvhd` : pas
+  de chevauchement ;
+- les chapitres utilisent exactement ces durées.
+
+Résultat mesuré sur 62 épisodes :
+- décalage audio/vidéo identique aux fichiers d'origine à 0,7 ms près ;
+- aucune dérive ;
+- aucun avertissement ffmpeg ;
+- chaque chapitre commence un instant (0,114 s) avant la première image de son
+  épisode.
+
+En mode `--reencode`, ffmpeg applique les edit lists au décodage, donc les
+chapitres utilisent la durée de présentation (lue dans `elst` par `mp4.probe`).
 
 Codes de sortie : `0` = tout OK, `1` = au moins un échec (relancer pour
 réessayer), `2` = entrée invalide, `130` = interrompu (Ctrl+C, reprise
@@ -166,8 +226,9 @@ sequenceDiagram
 | Dépendances | **Aucune** (bibliothèque standard) | `python -m shortdramagen` marche sans `pip install`, y compris sous Windows |
 | HTTP | `urllib` derrière une petite classe `Http` | Proxy et CA système gérés ; remplaçable par un faux dans les tests |
 | Parallélisme | `ThreadPoolExecutor` | Téléchargements limités par le réseau, pas par le CPU |
-| Contrôle vidéo | Lecture de la boîte `mvhd` en Python pur | Pas besoin d'installer ffmpeg |
-| Tests | `unittest` + fixtures JSON anonymisées + faux réseau | 100 % hors ligne, en 30 ms |
+| Contrôle vidéo | Lecture des boîtes MP4 (`mvhd`, `stsd`, `elst`) en Python pur | Pas besoin de ffmpeg pour télécharger ni pour vérifier |
+| Fusion | ffmpeg (PATH, `--ffmpeg` ou `pip install imageio-ffmpeg`) | Seul outil fiable pour remuxer ; optionnel |
+| Tests | `unittest` + fixtures JSON anonymisées + faux réseau + MP4 synthétiques | Hors ligne, < 1 s ; tests ffmpeg réels ignorés s'il est absent |
 
 Ce qui avait été envisagé en V1 (httpx, typer, Playwright) n'est plus
 nécessaire. Le navigateur piloté reste un **plan B** documenté, si dramafren
@@ -186,11 +247,12 @@ shortdramagen/
 ├── cdn.py           # formule de chemin, expiration
 ├── http.py          # client urllib (retries sur erreurs réseau et 5xx)
 ├── download.py      # téléchargement reprenable + contrôles
-├── mp4.py           # durée d'un MP4
+├── mp4.py           # durée, codecs, edit lists d'un MP4 (sans ffmpeg)
+├── film.py          # fusion en un seul film (ffmpeg) + chapitres
 ├── manifest.py      # état par série
 └── pipeline.py      # orchestration
 tests/
-├── fakes.py         # FakeHttp, générateur de MP4 minimal
+├── fakes.py         # FakeHttp, générateur de MP4 (pistes, avcC, esds, edit lists)
 ├── fixtures/        # extraits réels anonymisés (site officiel EN/FR, réponse get_video)
 └── test_*.py
 ```

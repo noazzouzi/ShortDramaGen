@@ -22,14 +22,47 @@ def official_html(props: dict) -> str:
     return f'<html><script id="__NEXT_DATA__" type="application/json">{json.dumps(data)}</script></html>'
 
 
-def make_mp4(duration_s: float, payload: int = 1000, timescale: int = 1000) -> bytes:
-    """Smallest file mp4.duration_seconds() understands: ftyp + moov/mvhd + mdat."""
-    mvhd_body = bytes(4) + bytes(8) + struct.pack(">II", timescale, int(duration_s * timescale)) + bytes(80)
-    mvhd = struct.pack(">I4s", 8 + len(mvhd_body), b"mvhd") + mvhd_body
-    moov = struct.pack(">I4s", 8 + len(mvhd), b"moov") + mvhd
-    ftyp = struct.pack(">I4s", 16, b"ftyp") + b"isom" + bytes(4)
-    mdat = struct.pack(">I4s", 8 + payload, b"mdat") + bytes(payload)
-    return ftyp + moov + mdat
+def box(kind: bytes, *payload: bytes) -> bytes:
+    body = b"".join(payload)
+    return struct.pack(">I4s", 8 + len(body), kind) + body
+
+
+def full_box(kind: bytes, *payload: bytes, version: int = 0) -> bytes:
+    return box(kind, bytes([version, 0, 0, 0]), *payload)
+
+
+def video_track(width: int, height: int, avcc: bytes, seconds: float, edit_s: float | None = None) -> bytes:
+    entry_body = bytes(24) + struct.pack(">HH", width, height) + bytes(50) + box(b"avcC", avcc)
+    return _track(b"vide", box(b"avc1", entry_body), 12800, seconds, edit_s)
+
+
+def audio_track(asc: bytes, bitrate: int, seconds: float, edit_s: float | None = None, rate: int = 44100) -> bytes:
+    """mp4a entry whose esds carries ``bitrate``: it must not affect the format key."""
+    dsi = bytes([0x05, len(asc)]) + asc
+    dcd_body = bytes([0x40, 0x15]) + bytes(3) + struct.pack(">II", bitrate, bitrate) + dsi
+    dcd = bytes([0x04, len(dcd_body)]) + dcd_body
+    es_body = bytes(3) + dcd + bytes([0x06, 0x01, 0x02])
+    esds = full_box(b"esds", bytes([0x03, len(es_body)]) + es_body)
+    entry_body = bytes(16) + struct.pack(">HHHHI", 2, 16, 0, 0, rate << 16) + esds
+    return _track(b"soun", box(b"mp4a", entry_body), rate, seconds, edit_s)
+
+
+def _track(handler: bytes, sample_entry: bytes, timescale: int, seconds: float, edit_s: float | None) -> bytes:
+    mdhd = full_box(b"mdhd", bytes(8), struct.pack(">II", timescale, int(seconds * timescale)), bytes(4))
+    hdlr = full_box(b"hdlr", bytes(4), handler, bytes(12), b"\0")
+    stsd = full_box(b"stsd", struct.pack(">I", 1), sample_entry)
+    parts = [box(b"mdia", mdhd, hdlr, box(b"minf", box(b"stbl", stsd)))]
+    if edit_s is not None:  # one edit segment, in the movie timescale (1000)
+        elst = full_box(b"elst", struct.pack(">IIiI", 1, int(edit_s * 1000), 0, 1 << 16))
+        parts.insert(0, box(b"edts", elst))
+    return box(b"trak", *parts)
+
+
+def make_mp4(duration_s: float, payload: int = 1000, timescale: int = 1000, tracks: tuple[bytes, ...] = ()) -> bytes:
+    """Smallest file the mp4 module understands: ftyp + moov (mvhd + tracks) + mdat."""
+    mvhd = full_box(b"mvhd", bytes(8), struct.pack(">II", timescale, int(duration_s * timescale)), bytes(80))
+    ftyp = box(b"ftyp", b"isom", bytes(4))
+    return ftyp + box(b"moov", mvhd, *tracks) + box(b"mdat", bytes(payload))
 
 
 class FakeHttp:

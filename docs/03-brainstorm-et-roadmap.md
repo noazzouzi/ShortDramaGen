@@ -46,14 +46,16 @@
 | 1 — Métadonnées | `inputs`, `official`, `cdn`, mode sonde | ✅ Fait |
 | 2 — Résolution | `dramafren.get_video` + secours officiel | ✅ Fait |
 | 3 — Téléchargement fiable | Parallélisme, reprise, contrôle de durée, manifest, source suivante sur échec | ✅ Fait — validé : 62/62 en VF 1080p, 684 Mo, 1 min 38 s |
-| 4 — Confort | `sdg verify`, `sdg concat` (un seul fichier « film »), barre de progression globale, file de plusieurs séries | À faire |
+| 4a — Film | `sdg film` / `fetch --film` : fusion sans ré-encodage + chapitres, `--reencode` si qualités mélangées | ✅ Fait — validé : 62 épisodes → 1 h 32, 717 Mo, 6 s, synchro à < 1 ms |
+| 4b — Confort | `sdg verify`, barre de progression globale, file de plusieurs séries | À faire |
 | 5 — Multi-plateformes | Vérifier les API `cdn-<plateforme>.dramafren.org` (ReelShort, ShortMax…) | À explorer |
 | 6 — Plan B | Resolver navigateur (Playwright) si l'API se ferme | Seulement si besoin |
 
 ## 5. Idées pour la suite du défi
 
-- **Film complet** : concaténation sans ré-encodage (`ffmpeg -f concat -c copy`)
-  avec un chapitre par épisode.
+- **Film complet** : ✅ fait (`sdg film`). Pistes suivantes :
+  - couper le générique de fin de chaque épisode ;
+  - produire une version « résumé » par saison.
 - **Veille** : relancer périodiquement sur une liste de séries et ne
   télécharger que les nouveaux épisodes. Le manifest le permet déjà.
 - **Catalogue local** : index des séries téléchargées (tags, acteurs, durées).

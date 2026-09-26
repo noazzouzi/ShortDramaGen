@@ -2,7 +2,8 @@
 
 Récupère automatiquement **tous les épisodes** d'une série DramaBox à partir
 d'une simple URL : jusqu'en 1080p, avec reprise sur coupure et vérification
-de chaque fichier.
+de chaque fichier. L'outil peut ensuite les **fusionner en un seul film** avec
+un chapitre par épisode.
 
 ```text
 $ python -m shortdramagen fetch "https://dramabox.dramafren.org/index.php?page=detail&id=41000105199&lang=fr" --lang fr
@@ -17,8 +18,8 @@ Terminé : 62 épisode(s) OK (62 téléchargé(s), 0 déjà présent(s)), 0 éch
 
 ## Installation
 
-Il faut seulement **Python ≥ 3.10**. Aucune dépendance, aucun navigateur,
-aucun ffmpeg.
+Pour télécharger, il faut seulement **Python ≥ 3.10** : aucune dépendance,
+aucun navigateur.
 
 ```bash
 git clone https://github.com/noazzouzi/ShortDramaGen.git
@@ -26,6 +27,11 @@ cd ShortDramaGen
 python -m shortdramagen --help        # utilisable tel quel
 pip install -e .                      # optionnel : ajoute la commande « sdg »
 ```
+
+Pour la **fusion en film**, il faut aussi ffmpeg. Le plus simple est
+`pip install imageio-ffmpeg` (ou `pip install -e ".[ffmpeg]"`), qui fournit
+ffmpeg sans installation système. Sinon : `winget install Gyan.FFmpeg`
+(Windows), `brew install ffmpeg` (macOS) ou `apt install ffmpeg` (Linux).
 
 Sous Windows, remplace `python` par `py` si besoin.
 
@@ -43,7 +49,32 @@ python -m shortdramagen fetch 41000105199 --lang fr -q 720p -e 1-10,28,50- -j 4
 
 # Juste les URLs (pour aria2c, IDM…) ; --json pour un export complet
 python -m shortdramagen links 41000105199 -q 1080p > liens.txt
+
+# Télécharger puis fusionner en un seul film (un chapitre par épisode)
+python -m shortdramagen fetch 41000105199 --lang fr --film
+
+# Fusionner une série déjà téléchargée (identifiant, URL ou dossier)
+python -m shortdramagen film 41000105199 --lang fr
+python -m shortdramagen film "downloads/41000105199-one-night-to-forever" -f "C:/Films/One Night.mp4"
 ```
+
+### Fusion en film
+
+- **Sans ré-encodage** : les épisodes d'une même qualité ont exactement les
+  mêmes paramètres (vérifié avant la fusion). Le film se crée en quelques
+  secondes, sans perte de qualité : 62 épisodes → 1 h 32, 717 Mo, **6 s**.
+- **Chapitres** « Épisode 1 », « Épisode 2 »… pour naviguer dans VLC, mpv,
+  MPC-HC, etc. (`--no-chapters` pour les désactiver).
+- **Contrôles** : durée finale vérifiée. Synchro audio/vidéo mesurée à moins de
+  1 ms d'écart par rapport aux épisodes d'origine, sans dérive sur 62 épisodes.
+- **Qualités mélangées** (ex. un épisode en 720p dans une série en 1080p) :
+  l'outil refuse et explique pourquoi. Deux solutions :
+  - retélécharger ces épisodes dans la même qualité ;
+  - `--reencode`, qui ré-encode tout (H.264/AAC) à la résolution majoritaire.
+    C'est beaucoup plus lent.
+- **Épisodes manquants** : refus par défaut ; `--allow-missing` fusionne ce
+  qui est là. Un film partiel est nommé `Titre (épisodes 1-10).mp4`.
+- Avec `fetch -e … --film`, le film contient exactement les épisodes demandés.
 
 **Entrées acceptées** : URL `dramaboxdb.com` (série ou épisode, avec ou sans
 `/fr/`), `dramabox.com/drama/…`, lien de partage de l'app, URL dramafren
@@ -61,7 +92,8 @@ qu'on reprend après une coupure ou un Ctrl+C.
 ```text
 downloads/41000105199-one-night-to-forever-fr/
 ├── E001.mp4 … E062.mp4
-└── manifest.json      # titre, épisodes, statut, qualité, URL et expiration, taille
+├── Qui Est la Véritable Mme Lafont.mp4   # avec --film ou « sdg film »
+└── manifest.json      # titre, épisodes, statut, qualité, URL et expiration, taille, film
 ```
 
 ## Comment ça marche
@@ -76,6 +108,9 @@ downloads/41000105199-one-night-to-forever-fr/
    `Range`), puis **vérifications** :
    - l'URL doit pointer vers le bon épisode (le chemin CDN est déterministe) ;
    - la durée du MP4 doit égaler la durée officielle à ±1 s.
+4. **Fusion** (option) : ffmpeg concatène les épisodes sans ré-encodage, avec
+   une durée imposée pour chacun et des chapitres calculés sur ces mêmes
+   durées (voir [architecture §3.9](docs/02-architecture.md#39-filmpy--fusion-en-un-seul-film)).
 
 ## Documentation
 
@@ -88,7 +123,8 @@ downloads/41000105199-one-night-to-forever-fr/
 ## Tests
 
 ```bash
-python -m unittest discover -s tests      # 25 tests, hors ligne, ~30 ms
+python -m unittest discover -s tests      # 42 tests, hors ligne, < 1 s
+# (3 tests de fusion utilisent un vrai ffmpeg ; ils sont ignorés s'il est absent)
 ```
 
 ## Avertissement
