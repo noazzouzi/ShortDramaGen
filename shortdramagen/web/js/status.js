@@ -97,3 +97,50 @@ export function matchFilter(group, filter) {
   if (filter.group) return filter.group(group);
   return group.versions.some(filter.test);
 }
+
+// Action principale d'une version selon son état (spec E1, E3) : { id, label, icon }.
+// short : libellé court pour une carte (préfixé par la version si la série en a plusieurs).
+export function primaryAction(version, { prefix = "" } = {}) {
+  const k = counts(version);
+  const job = version.job;
+  const film = version.film;
+  if (job && job.kind === "fetch") {
+    if (["running", "pausing", "queued"].includes(job.status)) return { id: "pause", label: "Mettre en pause", icon: "pause" };
+    if (["paused", "interrupted"].includes(job.status)) return { id: "resume", label: "Reprendre", icon: "play" };
+  }
+  if (job && job.kind === "film") return { id: "drawer", label: "Film en préparation…", icon: "film" };
+  if (k.repair) {
+    const onlyFailures = !version.counts.missing && !k.partial && !version.counts.pending;
+    return { id: "repair", label: onlyFailures ? `${prefix}Réessayer · ${k.repair}` : `${prefix}Réparer · ${k.repair + k.partial + version.counts.pending}`, icon: "refresh" };
+  }
+  if (k.partial) return { id: "repair", label: `${prefix}Reprendre · ${k.partial + version.counts.pending}`, icon: "play" };
+  if (version.counts.pending) return { id: "complete", label: `${prefix}Compléter · ${version.counts.pending}`, icon: "download" };
+  if (film && ["partial", "stale", "missing_file"].includes(film.state)) {
+    if (film.state === "partial" && version.counts.not_requested) return { id: "watch_film", label: "Regarder le film", icon: "play" };
+    return { id: "film", label: "Recréer le film", icon: "film", replace: true };
+  }
+  if (film && film.state === "ready") return { id: "watch_film", label: "Regarder le film", icon: "play" };
+  if (version.counts.not_requested) return { id: "complete", label: `${prefix}Compléter · ${version.counts.not_requested}`, icon: "download" };
+  if (k.present) return { id: "film", label: "Créer le film", icon: "film" };
+  return { id: "open", label: "Voir la fiche", icon: "next" };
+}
+
+// Problème à signaler dans « À traiter » (null si rien, ou si l'utilisateur l'a ignoré).
+export function toTreat(version) {
+  if (version.job) return null;
+  const k = counts(version);
+  const ignored = new Set(version.ignored || []);
+  if (k.repair && !ignored.has("failed")) {
+    const c = version.counts;
+    const parts = [];
+    if (c.failed) parts.push(plural(c.failed, "échec", "échecs"));
+    if (c.unavailable) parts.push(plural(c.unavailable, "indisponible", "indisponibles"));
+    if (c.missing) parts.push(plural(c.missing, "fichier manquant", "fichiers manquants"));
+    return { problem: "failed", text: parts.join(" · ") };
+  }
+  if (k.partial && !ignored.has("interrupted")) return { problem: "interrupted", text: `Interrompu · ${k.present}/${k.total}` };
+  if (version.counts.pending && !ignored.has("incomplete")) {
+    return { problem: "incomplete", text: `${plural(version.counts.pending, "épisode", "épisodes")} à télécharger` };
+  }
+  return null;
+}

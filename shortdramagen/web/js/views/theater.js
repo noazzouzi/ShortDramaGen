@@ -39,7 +39,7 @@ export function parseVtt(text) {
 }
 
 // target : numéro d'épisode ou "film". navigate(target) change d'épisode, close() ferme.
-export function openTheater({ group, detail, target, navigate, close }) {
+export function openTheater({ group, detail, target, navigate, close, openExternal, retry }) {
   const isFilm = target === "film";
   const playable = detail.episodes.filter((e) => e.media_url);
   const n = isFilm ? null : Number(target);
@@ -70,7 +70,16 @@ export function openTheater({ group, detail, target, navigate, close }) {
     video.src = ep.media_url;
   } else if (ep) {
     const status = EPISODE[ep.status]?.label || ep.status;
-    showVeil(h("p", { text: `Épisode ${ep.n} : ${status.toLowerCase()}. Il n'y a pas de fichier à lire.` }), next ? h("button", { class: "btn btn-secondary", type: "button", onclick: () => navigate(next.n), text: `Passer à l'épisode ${next.n}` }) : null);
+    const skip = next ? h("button", { class: "btn btn-secondary", type: "button", onclick: () => navigate(next.n), text: `Passer à l'épisode ${next.n}` }) : null;
+    if (ep.status === "downloading" || ep.status === "queued") {
+      showVeil(h("p", { text: `L'épisode ${ep.n} est encore en téléchargement. Il sera lisible dès qu'il sera vérifié.` }), skip);
+    } else if (ep.status === "missing" || ep.status === "removed") {
+      showVeil(h("p", { text: `Le fichier de l'épisode ${ep.n} n'est plus dans le dossier.` }),
+        retry ? h("button", { class: "btn btn-primary", type: "button", onclick: () => retry(ep.n), text: "Retélécharger l'épisode" }) : null, skip);
+    } else {
+      showVeil(h("p", { text: `Épisode ${ep.n} : ${status.toLowerCase()}. Il n'y a pas de fichier à lire.` }),
+        retry && ep.status !== "not_requested" ? h("button", { class: "btn btn-primary", type: "button", onclick: () => retry(ep.n), text: "Réessayer" }) : null, skip);
+    }
   } else {
     showVeil(h("p", { text: `L'épisode ${target} n'existe pas dans cette version.` }));
   }
@@ -79,6 +88,7 @@ export function openTheater({ group, detail, target, navigate, close }) {
     const url = isFilm ? detail.film?.media_url : ep?.media_url;
     showVeil(
       h("p", { text: "Ton navigateur n'arrive pas à lire cette vidéo." }),
+      openExternal ? h("button", { class: "btn btn-primary", type: "button", onclick: () => openExternal(isFilm ? "film" : ep.n), text: "Ouvrir dans le lecteur par défaut" }) : null,
       url ? h("a", { class: "btn btn-secondary", href: `${url}?download=1`, download: "" }, icon("download"), "Enregistrer le fichier pour l'ouvrir dans ton lecteur") : null,
     );
   });
@@ -182,7 +192,11 @@ export function openTheater({ group, detail, target, navigate, close }) {
   const el = h(
     "div",
     { class: "theater", role: "dialog", "aria-modal": "true", "aria-labelledby": titleId },
-    h("div", { class: "theater-bar" }, h("h2", { id: titleId, text: `${detail.title} · ${versionShort(detail)}` }), h("span", { class: "where", text: where }), closeButton),
+    h("div", { class: "theater-bar" }, h("h2", { id: titleId, text: `${detail.title} · ${versionShort(detail)}` }), h("span", { class: "where", text: where }),
+      openExternal && (isFilm ? detail.film?.media_url : ep?.media_url)
+        ? h("button", { class: "btn btn-sm btn-ghost theater-external", type: "button", title: "Ouvrir dans le lecteur par défaut (VLC, Films et TV…)", onclick: () => { video.pause(); openExternal(isFilm ? "film" : ep.n); } }, icon("external", { size: 14 }), "Lecteur par défaut")
+        : null,
+      closeButton),
     h("div", { class: "theater-body" }, h("div", { class: "stage" }, isFilm ? null : navButton(prev, "prev"), box, isFilm ? null : navButton(next, "next")), panel),
   );
 

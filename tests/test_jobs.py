@@ -334,6 +334,21 @@ class ControlTest(LiveTest):
         self.call("POST", f"/api/jobs/{job_id}/cancel", {"delete_parts": False})
         self.wait_job(job_id, "cancelled")
 
+    def test_repair_after_cancel_takes_the_pending_episodes(self):
+        self.app.settings.update({"parallel_downloads": 1})  # one at a time: the others wait in the queue
+        job_id = self.fetch_job()
+        self.running_with_bytes(job_id)
+        self.call("POST", f"/api/jobs/{job_id}/cancel", {"delete_parts": False})
+        self.wait_job(job_id, "cancelled")
+        statuses = self.statuses()
+        self.assertIn("pending", statuses.values())  # requested, never started
+        left = sorted(n for n, s in statuses.items() if s != "done")
+        status, data = self.call("POST", f"/api/series/{KEY}/retry", {})
+        self.assertEqual(status, 201, data)
+        job = self.wait_job(data["job"]["id"], "done", timeout=30)
+        self.assertEqual(sorted(job["result"]["done"]), left)
+        self.assertEqual(set(self.statuses().values()), {"done"})
+
     def test_settings_folder_cannot_change_during_a_download(self):
         job_id = self.fetch_job()
         self.running_with_bytes(job_id)

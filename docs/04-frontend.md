@@ -119,7 +119,7 @@ Contrat d'API complet (routes, charges utiles, événements SSE) : [spec-v1.md �
 | **0. Moteur pilotable** ✅ fait | Annulation injectable, événements de progression (octets, épisodes), codes d'erreur stables, option `force`, aperçu sans téléchargement, `make_film` réutilisable. La CLI garde ses commandes et les tests existants passent. | 1,5 j |
 | **1. Serveur en lecture seule** ✅ fait | `sdg ui`, bibliothèque, fiches, lecture des médias, plus un premier client en lecture | 1,5 j |
 | **2. Jobs et temps réel** ✅ fait | File, SSE, pause, reprise, réparation, film, corbeille, réglages | 2 j |
-| **3. Client MVP** | Tous les écrans de la maquette | 4 à 5 j |
+| **3. Client MVP** ✅ fait | Tous les écrans de la maquette | 4 à 5 j |
 | V1.1 | Catalogue des langues, « Continuer à regarder », nouveaux épisodes, notifications Windows, zip portable | 2 j |
 | V2 | Accès depuis le téléphone (réseau local authentifié), `.exe`, 2 séries en parallèle | — |
 
@@ -257,6 +257,76 @@ reprise, réparation, film, corbeille, aperçu, réglages, flux SSE).
   de la série) ;
 - l'ouverture dans le lecteur par défaut et l'Explorateur ne sont testées
   que par simulation (la vérification réelle se fera sous Windows).
+
+### Étape 3 : livrée
+
+Tout se fait maintenant depuis le navigateur, sans terminal. Description
+technique : [architecture §3.13](02-architecture.md#313-client-web-étape-3).
+
+Critère de fin atteint dans Chromium, sur le vrai réseau (VF de *One Night
+to Forever*, bibliothèque vide) :
+1. **coller** le lien, hors d'un champ (Ctrl+V) ou dans le champ du haut puis
+   Entrée : le dialogue d'ajout montre l'aperçu (affiche, 62 épisodes, 1 h 32,
+   qualités disponibles) ; choix de la VF et des épisodes 1 à 12 (≈ 136 Mo) ;
+2. **regarder l'ép. 1 pendant que la suite arrive** : la vidéo joue alors que
+   la pilule affiche encore « ↓ 6/12 » ;
+3. **Télécharger le reste** (menu ⋯ de la fiche) : les 50 autres épisodes ;
+4. **réparer** : 33 épisodes supprimés dans le dossier ; « Réparer · 33
+   épisodes », **arrêté** en route depuis le tiroir Activité (confirmation en
+   ligne, fichiers partiels gardés), puis relancé : le bouton reprend les
+   manquants, l'interrompu et ceux restés en file, et la série revient à
+   62/62 ;
+5. **créer le film** depuis la carte Film (pré-vol, 62 chapitres, 717 Mo),
+   le **regarder** avec ses chapitres ; **supprimer** le film avec le
+   dialogue Supprimer (toast « Annuler »), puis le recréer.
+
+Aucune erreur dans la console sur tout le parcours. Écrans vérifiés en 1440,
+1000, 720, 500 et 390 px, sans défilement horizontal, en thème sombre et
+clair.
+
+Livré :
+- **coquille** : en-tête avec le champ « Chercher ou coller » (puce de
+  détection, Ctrl+K), bouton Ajouter, pilule d'activité, bandeaux (moteur
+  injoignable, disque plein, reprise, hors ligne, autre onglet), toasts avec
+  action, tiroir Activité (épinglable ; page `#/activite` sur mobile), barre
+  du bas et mini-barre sur mobile, polices IBM Plex auto-hébergées ;
+- **dialogue d'ajout** : aperçu, versions, qualité avec estimation, choix
+  des épisodes (grille et plages « 1-10, 28, 50- »), « Créer le film à la
+  fin », lot de plusieurs liens, déjà dans la bibliothèque ou déjà en file ;
+- **Bibliothèque** : mur d'affiches (coloration pendant le téléchargement,
+  actions au survol et au clavier), vue liste, filtres, tri, étagère « À
+  traiter » avec « Tout réparer », sélection multiple et barre d'actions ;
+- **Fiche** : barre d'état avec l'action principale (Réparer, Reprendre,
+  Compléter, Créer le film…), onglets de versions, grille avec sélection
+  (Ctrl+clic, Espace, Maj), volet de détail, carte Film (pré-vol, remèdes,
+  options, nom, remplacement), Stockage, Détails techniques ;
+- **Supprimer** (film, épisodes, tout, fichiers partiels ; annulable) ;
+  **Réglages** (9 sections, enregistrement immédiat, santé revérifiable) ;
+  **aide des raccourcis** (`?`) ; **Théâtre** avec « Lecteur par défaut ».
+
+Corrigé pendant la vérification :
+- Entrée dans le champ du haut ouvrait le dialogue d'ajout et le refermait
+  aussitôt (l'appui atteignait son bouton Fermer) : l'appui est consommé, et
+  un dialogue donne désormais le focus à son titre plutôt qu'à Fermer ;
+- après un arrêt, les épisodes restés en file (`pending`) n'étaient pas repris
+  par « Réparer » : ils le sont (serveur, « Tout réparer » et libellé) ;
+- aucun moyen de télécharger les épisodes non demandés quand un problème
+  occupe l'action principale : entrée « Télécharger le reste » du menu ;
+- les tuiles passent à « téléchargé » dès l'événement `episode`, sans
+  attendre le rafraîchissement de la bibliothèque ;
+- le menu ⋯ des affiches reste visible sur écran tactile.
+
+Tests : 132 hors ligne (1 nouveau : réparation après un arrêt). Le client
+lui-même n'a pas de tests automatisés dans le dépôt ; il a été vérifié avec
+des scripts Playwright.
+
+Écarts par rapport au plan :
+- l'Explorateur, le lecteur par défaut et `--window` restent à vérifier sous
+  Windows ;
+- le serveur charge le client au démarrage : après une mise à jour, relancer
+  `sdg ui` ;
+- les points V1.1 (catalogue des langues, « Continuer à regarder »,
+  notifications Windows…) restent à faire.
 
 Détails de la recherche : [brainstorm/1-recherche-capacites-du-moteur.md](frontend/brainstorm/1-recherche-capacites-du-moteur.md).
 

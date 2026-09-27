@@ -261,7 +261,7 @@ def with_job(summary: dict, episodes: list[dict], data: dict, job: dict | None) 
     """The version as seen while a job works on it: episodes "downloading" or "queued"."""
     if not job:
         return summary, episodes
-    info = {k: job.get(k) for k in ("id", "kind", "status", "phase", "position")}
+    info = {k: job.get(k) for k in ("id", "kind", "status", "phase", "position", "film_after")}
     if job.get("kind") != "fetch":
         return {**summary, "job": info}, episodes
     raw = {e.get("number"): e.get("status") for e in data.get("episodes") or [] if isinstance(e, dict)}

@@ -89,23 +89,31 @@ python -m shortdramagen ui -o "D:/Séries"        # autre dossier (mémorisé po
 python -m shortdramagen ui --window              # fenêtre d'application Edge/Chrome, sans barre d'adresse
 ```
 
-- **Bibliothèque** : un mur d'affiches, avec l'état de chaque série
-  (complète, à compléter, avec échecs, interrompue, film prêt), une recherche
-  et des filtres. Les versions d'une même série (VO, VF…) sont regroupées.
+- **Ajouter** : colle un lien n'importe où dans la page (ou dans le champ du
+  haut) ; un aperçu montre l'affiche, le nombre d'épisodes, la durée, les
+  versions et la place nécessaire. On choisit la langue, la qualité, les
+  épisodes, et si le film doit être créé à la fin.
+- **Bibliothèque** : un mur d'affiches (ou une liste), avec l'état de chaque
+  série (complète, à compléter, avec échecs, interrompue, film prêt), une
+  recherche, des filtres, une étagère « À traiter » avec « Tout réparer » et
+  la sélection multiple. Les versions d'une même série (VO, VF…) sont
+  regroupées.
 - **Fiche série** : tous les épisodes en grille, avec le détail de chaque
-  problème (échec, indisponible, fichier supprimé, 720p isolé…), le film, la
-  place occupée et la commande à lancer pour réparer.
+  problème (échec, indisponible, fichier supprimé, 720p isolé…) et un bouton
+  pour chaque remède (Réparer, Reprendre, Compléter, Retélécharger), la carte
+  Film (vérifications avant création, puis création en un clic), la place
+  occupée et la suppression annulable.
 - **Lecture** dans le navigateur, épisode par épisode (enchaînement
   automatique) ou le film avec ses chapitres.
 - **En direct** : la progression s'affiche dans l'en-tête (« ↓ 21/80 · ≈ 1 min »)
   et dans le titre de l'onglet, les épisodes se colorent au fur et à mesure.
-- **Le serveur télécharge lui-même** : file de téléchargements et de films,
-  pause, reprise à l'octet près, annulation, réparation, suppression
-  annulable. Si tu fermes la fenêtre ou si Internet coupe, tout reprend tout
-  seul ensuite. Ces actions ont leur API ([architecture §3.12](docs/02-architecture.md#312-jobs-et-temps-réel-étape-2)) ;
-  les boutons correspondants arrivent avec la prochaine version de
-  l'interface. En attendant, la fiche affiche la commande `fetch` ou `film`
-  à copier.
+- **Le serveur télécharge lui-même** : file de téléchargements et de films
+  (tiroir Activité), pause, reprise à l'octet près, annulation, réparation.
+  Si tu fermes la fenêtre ou si Internet coupe, tout reprend tout seul
+  ensuite. Tout a aussi son API ([architecture §3.12](docs/02-architecture.md#312-jobs-et-temps-réel-étape-2)).
+- **Réglages** : dossier, langue préférée, qualité, téléchargements en
+  parallèle, film automatique, thème sombre ou clair, raccourcis clavier
+  (`?` pour la liste), santé (réseau, ffmpeg, disque).
 - Tout reste **local** : le serveur n'écoute que sur `127.0.0.1` et refuse
   les requêtes des autres sites. Les liens signés de la source ne sont
   jamais affichés.
@@ -155,12 +163,12 @@ downloads/41000105199-one-night-to-forever-fr/
 | [01 — Étude technique](docs/01-etude-technique.md) | Constats vérifiés : API dramafren, CDN, site officiel, formats d'URL, cadre légal |
 | [02 — Architecture](docs/02-architecture.md) | Composants, flux, manifest, moteur pilotable (événements, codes d'erreur), choix techniques |
 | [03 — Brainstorm & roadmap](docs/03-brainstorm-et-roadmap.md) | Approches comparées, risques, plans B, suite |
-| [04 — Frontend](docs/04-frontend.md) | Interface web : recherche, 3 concepts et jury, spec, système visuel, API, maquette, avancement (étapes 0 à 2 livrées) |
+| [04 — Frontend](docs/04-frontend.md) | Interface web : recherche, 3 concepts et jury, spec, système visuel, API, maquette, avancement (étapes 0 à 3 livrées) |
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests      # 131 tests, hors ligne, environ 10 s
+python -m unittest discover -s tests      # 132 tests, hors ligne, environ 15 s
 # (4 tests de fusion utilisent un vrai ffmpeg ; ils sont ignorés s'il est absent)
 ```
 

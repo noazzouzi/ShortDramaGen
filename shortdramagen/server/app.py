@@ -149,6 +149,14 @@ class App:
             log.exception("Mesure de la connexion")
         self.bus.publish("health", self.connectivity.snapshot())
 
+    def recheck(self) -> None:
+        """Measure the network and look for ffmpeg again, now."""
+        with self._ffmpeg_lock:
+            self._ffmpeg = None
+        if self.connectivity.check():
+            self.runner.connectivity_changed()
+        self.bus.publish("health", self.connectivity.snapshot())
+
     def _purge_trash(self) -> None:
         now = time.monotonic()
         if now - self._last_purge >= 30:

@@ -247,6 +247,8 @@ def create_job(app: "App", req: "Request"):
 # --- repairs ---------------------------------------------------------------------------------
 
 REPAIRABLE = ("failed", "unavailable", "missing", "partial")
+# Requested but never downloaded (a cancelled job leaves its queue this way): « Réparer » takes them too.
+RETRYABLE = REPAIRABLE + ("pending",)
 
 
 def _fetch_for_version(app: "App", key: str, numbers: list[int] | None, *, quality: str | None = None,
@@ -270,14 +272,14 @@ def _fetch_for_version(app: "App", key: str, numbers: list[int] | None, *, quali
 
 
 def retry(app: "App", req: "Request", key: str):
-    """Réessayer / Compléter: failed, unavailable, missing and interrupted episodes (+ the others with include_pending)."""
+    """Réparer / Compléter: failed, unavailable, missing, interrupted and still pending episodes (+ the unrequested ones with include_pending)."""
     data = body(req)
     app.library.refresh_keys([key])
     detail = app.library.series(key)
     include_pending = flag(data, "include_pending")
     wanted = episode_numbers(data.get("episodes"))
     redownload = episode_numbers(data.get("redownload"), "redownload") or []
-    statuses = REPAIRABLE + (("pending", "not_requested") if include_pending else ())
+    statuses = RETRYABLE + (("not_requested",) if include_pending else ())
     if wanted is None:
         wanted = [e["n"] for e in detail["episodes"] if e["status"] in statuses]
     numbers = sorted(set(wanted) | set(redownload))
@@ -324,8 +326,9 @@ def repair(app: "App", req: "Request"):
         skip = set(ignored.get(key, []))
         numbers = [
             e["n"] for e in detail["episodes"]
-            if e["status"] in REPAIRABLE and not ("failed" in skip and e["status"] != "partial")
+            if e["status"] in RETRYABLE and not ("failed" in skip and e["status"] in ("failed", "unavailable", "missing"))
             and not ("interrupted" in skip and e["status"] == "partial")
+            and not ("incomplete" in skip and e["status"] == "pending")
         ]  # fmt: skip
         if not numbers:
             continue
@@ -454,6 +457,18 @@ def restore(app: "App", req: "Request", trash_id: str):
     app.library.refresh(force=True)
     app.bus.publish("library", {"op": "upserted", "series_key": result["series_key"], "version": app.library.version})
     return json_reply(result)
+
+
+def open_library(app: "App", req: "Request"):
+    """The downloads folder itself in the file manager."""
+    root = app.library.root
+    if not root.is_dir():
+        raise ApiError(404, "not_found", "Le dossier de la bibliothèque est introuvable.")
+    try:
+        desktop.reveal(root)
+    except OSError as e:
+        raise ApiError(422, "open_failed", f"Impossible d'ouvrir : {e}") from None
+    return Reply(204)
 
 
 def rescan(app: "App", req: "Request"):

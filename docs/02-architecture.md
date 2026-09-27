@@ -520,6 +520,58 @@ jamais une URL donnée par le client : il n'en garde que le numéro de série.
 Il s'arrête tout seul après `auto_shutdown_minutes` (10 par défaut) sans
 onglet ouvert ni téléchargement.
 
+### 3.13 Client web (étape 3)
+
+Le client est en JavaScript natif (modules ES, sans build ni dépendance),
+servi par `sdg ui` depuis `shortdramagen/web/`. Spec des écrans :
+[spec-v1](frontend/spec-v1.md) ; système visuel :
+[design-system](frontend/design-system.md).
+
+```
+web/
+├── index.html        # coquille ; le jeton du serveur est injecté dans <meta name="sdg-token">
+├── app.css           # jetons de couleur (sombre et clair), composants, responsive
+├── fonts/            # IBM Plex Sans et Mono (OFL), auto-hébergées
+└── js/
+    ├── main.js       # routeur par hash, état partagé, SSE, raccourcis, coller, glisser-déposer
+    ├── api.js        # fetch + jeton + ETag ; ApiError(status, code, message, details)
+    ├── live.js       # flux /api/events (reconnexion), pilule d'activité
+    ├── actions.js    # commandes (ajouter, réparer, film, supprimer…) + toast de résultat
+    ├── ui.js         # toasts, dialogues (<dialog> natif), menus, popovers
+    ├── dom.js        # h() sans innerHTML, pictogrammes SVG, annonces lecteur d'écran
+    ├── detect.js     # reconnaissance des liens collés (série, épisode, lot)
+    ├── status.js     # statuts, filtres, action principale d'une version, « À traiter »
+    ├── format.js     # tailles, durées, dates, pluriels
+    └── views/        # add, activity, library, series, theater, settings, common
+```
+
+**Routes** (hash) : `#/` (bibliothèque, `?f=` filtre, `?q=` recherche,
+`?tri=`, `?vue=liste`), `#/serie/<bookId>/<vo|fr|…>`, `…/lire/<n|film>`
+(Théâtre par-dessus la fiche), `#/reglages/<section>`, `#/activite`.
+
+**Données** : la bibliothèque est rechargée avec `If-None-Match` à chaque
+événement `library` (sinon toutes les 15 s si le flux est coupé) ; la fiche
+recharge `/api/series/<clé>` quand l'ETag change. Les événements `progress`
+mettent à jour la pilule, les tuiles en cours et la coloration des affiches
+sans reconstruire la page ; `episode` passe une tuile à « téléchargé » tout
+de suite ; `job` déclenche les toasts de fin et le tiroir.
+
+**Sécurité** (CSP stricte du serveur) : aucun `innerHTML`, aucun attribut
+`style` (seules des variables CSS sont posées par le CSSOM), aucun script en
+ligne. Les liens signés de la source n'arrivent jamais au client.
+
+**Accessibilité** : focus visible, grille d'épisodes à tabindex mobile
+(flèches, Début, Fin, Espace, Maj), dialogues modaux natifs (focus sur le
+titre ou le champ, rendu à l'élément d'origine), annonces des paliers de
+progression, `prefers-reduced-motion`, `forced-colors`.
+
+**Commandes** : chaque bouton appelle une fonction de `actions.js`, qui
+appelle l'API puis affiche un toast (avec « Voir » ou « Annuler »). Les
+erreurs de pré-vol du film (`ffmpeg_missing`, `film_missing_episodes`…)
+remontent à la carte Film, qui propose le remède. « Réparer » reprend les
+épisodes en échec, indisponibles, supprimés, interrompus et restés en file
+(`pending`) ; « Compléter » y ajoute les épisodes non demandés.
+
 ## 4. Séquence d'un `sdg fetch`
 
 ```mermaid
@@ -585,7 +637,7 @@ shortdramagen/
 ├── trash.py         # suppression annulable
 ├── desktop.py       # ouvrir dans l'Explorateur / le lecteur
 ├── server/          # sdg ui : app, api, actions, media (Range), security, launch
-└── web/             # client : index.html, app.css, js/ (vues bibliothèque, fiche, théâtre)
+└── web/             # client (§3.13) : index.html, app.css, fonts/, js/ et js/views/
 tests/
 ├── fakes.py         # FakeHttp, générateur de MP4 (pistes, avcC, esds, edit lists)
 ├── fixtures/        # extraits réels anonymisés (site officiel EN/FR, réponse get_video)

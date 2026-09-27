@@ -484,6 +484,7 @@ class JobRunner:
                     out[job.series_key] = {
                         "id": job.id, "kind": job.kind, "status": job.status, "phase": job.phase,
                         "position": self._position(job), "selected": job.selected,
+                        "film_after": bool(job.kind == "fetch" and job.params.get("film_after")),
                     }  # fmt: skip
             return out
 

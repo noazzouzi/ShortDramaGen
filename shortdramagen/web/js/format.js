@@ -103,3 +103,18 @@ export function versionSlug(version) {
 export function capitalize(text) {
   return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
 }
+
+const hourFmt = new Intl.DateTimeFormat("fr-FR", { hour: "2-digit", minute: "2-digit" });
+const weekdayFmt = new Intl.DateTimeFormat("fr-FR", { weekday: "long" });
+
+// « 18:52 » aujourd'hui, « hier », puis le jour de la semaine ou la date.
+export function shortWhen(iso) {
+  const date = new Date(iso);
+  if (!iso || Number.isNaN(date.getTime())) return "";
+  const start = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((start(new Date()) - start(date)) / 86400000);
+  if (days === 0) return hourFmt.format(date);
+  if (days === 1) return "hier";
+  if (days < 7) return weekdayFmt.format(date);
+  return dayFmt.format(date);
+}

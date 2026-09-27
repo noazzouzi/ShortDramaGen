@@ -44,6 +44,8 @@ def library_etag(app: "App") -> str:
 
 
 def health(app: "App", req: "Request"):
+    if req.query.get("check") == "1":  # « Tout revérifier » : réseau et ffmpeg mesurés maintenant
+        app.recheck()
     return json_reply(app.health())
 
 
@@ -103,6 +105,7 @@ ROUTES: list[tuple[re.Pattern, dict[str, Handler]]] = [
     (re.compile(r"^/api/events$"), {"GET": actions.events}),
     (re.compile(r"^/api/library$"), {"GET": library}),
     (re.compile(r"^/api/library/rescan$"), {"POST": actions.rescan}),
+    (re.compile(r"^/api/library/open$"), {"POST": actions.open_library}),
     (re.compile(rf"^/api/series/{_KEY}$"), {"GET": series, "DELETE": actions.delete_series}),
     (re.compile(rf"^/api/series/{_KEY}/retry$"), {"POST": actions.retry}),
     (re.compile(rf"^/api/series/{_KEY}/redownload$"), {"POST": actions.redownload}),
