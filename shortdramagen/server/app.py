@@ -1,7 +1,8 @@
 """HTTP server of ``sdg ui``: standard library only, listening on 127.0.0.1.
 
-``App`` holds the state (settings, library index, page token, static files)
-and turns a request into a reply; ``Handler`` only reads and writes HTTP.
+``App`` holds the state (settings, library index, jobs, events, page token,
+static files) and turns a request into a reply; ``Handler`` only reads and
+writes HTTP.
 """
 
 from __future__ import annotations
@@ -9,7 +10,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import mimetypes
+import os
 import re
+import shutil
 import socket
 import sys
 import threading
@@ -22,11 +25,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .. import __version__
-from ..library import LibraryIndex
-from ..settings import Settings
+from ..connectivity import Connectivity
+from ..events import EventBus
+from ..http import Http
+from ..jobs import JobRunner
+from ..library import IgnoredStore, LibraryIndex
+from ..settings import Settings, state_dir
+from ..trash import Trash
 from . import api, security
 from .media import FileReply, copy_span
-from .replies import Reply, error_reply
+from .replies import Reply, StreamReply, error_reply
 
 log = logging.getLogger("shortdramagen.server")
 
@@ -52,6 +60,7 @@ class Request:
     method: str
     target: str
     headers: object  # http.client.HTTPMessage (case-insensitive get)
+    body: bytes = b""
     path: str = ""
     query: dict = field(default_factory=dict)
 
@@ -84,15 +93,115 @@ def load_static() -> dict[str, tuple[bytes, str]]:
 
 
 class App:
-    def __init__(self, settings: Settings, library: LibraryIndex, secret: str):
+    def __init__(
+        self,
+        settings: Settings,
+        library: LibraryIndex,
+        secret: str,
+        http=None,
+        connectivity: Connectivity | None = None,
+        state: Path | None = None,
+        **runner_options,
+    ):
         self.settings = settings
         self.library = library
         self.token = security.page_token(secret)
         self.static = load_static()
         self.port = 0  # set once bound
         self.started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.state = state or state_dir()
+        self.http = http or Http()
+        self.bus = EventBus()
+        self.connectivity = connectivity or Connectivity()
+        root = library.root
+        self.runner = JobRunner(root, settings, self.bus, self.http, library, self.connectivity, **runner_options)
+        self.trash = Trash(root, lambda: self.settings["trash_minutes"])
+        self.ignored = IgnoredStore(root)
+        library.job_overlay = self.runner.overlay
+        library.ignored = self.ignored.get
+        self.preview_cache: dict[tuple, tuple[float, dict]] = {}
+        self.preview_covers: dict[tuple, str] = {}
+        self.closing = False
+        self.last_activity = time.monotonic()
+        self.on_shutdown = None  # set by launch: stops the HTTP server
         self._ffmpeg: tuple[float, dict] | None = None
         self._ffmpeg_lock = threading.Lock()
+        self._last_purge = 0.0
+        self.runner.tick_hooks.append(self._purge_trash)
+
+    def start(self) -> list[str]:
+        """Start the job runner (resumes interrupted jobs) and measure the network once."""
+        self.trash.purge()
+        requeued = self.runner.start()
+        threading.Thread(target=self._check_network, name="sdg-network", daemon=True).start()
+        return requeued
+
+    def close(self) -> None:
+        self.closing = True
+        self.bus.publish("server", {"op": "shutdown"})
+        self.runner.close()
+        self.trash.purge(everything=True)
+
+    def _check_network(self) -> None:
+        try:
+            self.connectivity.check()
+        except Exception:  # the check is informative only
+            log.exception("Mesure de la connexion")
+        self.bus.publish("health", self.connectivity.snapshot())
+
+    def _purge_trash(self) -> None:
+        now = time.monotonic()
+        if now - self._last_purge >= 30:
+            self._last_purge = now
+            self.trash.purge()
+
+    def switch_root(self, root: Path) -> None:
+        """New downloads folder (settings): library, queue, trash and ignored problems follow."""
+        self.runner.set_root(root)
+        self.library.set_root(root)
+        self.trash.root = Path(root)
+        self.ignored = IgnoredStore(root)
+        self.library.ignored = self.ignored.get
+
+    def health(self) -> dict:
+        from .api import API_VERSION
+
+        root = self.library.root
+        try:
+            free = shutil.disk_usage(root).free
+        except OSError:
+            free = None
+        return {
+            "version": __version__,
+            "api": API_VERSION,
+            "platform": sys.platform,
+            "python": sys.version.split()[0],
+            "pid": os.getpid(),
+            "started_at": self.started_at,
+            "downloads_dir": str(root),
+            "downloads_dir_ok": root.is_dir(),
+            "free_bytes": free,
+            "ffmpeg": self.ffmpeg_status(),
+            **self.connectivity.snapshot(),
+            "read_only": False,
+            "jobs": self.runner.counts(),
+            "library_version": self.library.version,
+            "settings_version": self.settings.version,
+        }
+
+    def snapshot(self) -> dict:
+        """First SSE message: everything a client needs to be in sync."""
+        return {
+            "jobs": self.runner.list(),
+            "library_version": self.library.version,
+            "settings_version": self.settings.version,
+            "health": self.health(),
+        }
+
+    def idle_seconds(self) -> float:
+        if self.bus.client_count or self.runner.has_work():
+            return 0.0
+        return time.monotonic() - self.last_activity
 
     def ffmpeg_status(self, max_age: float = 30.0) -> dict:
         from .. import film
@@ -104,17 +213,24 @@ class App:
 
     # request -> reply
 
-    def dispatch(self, req: Request) -> Reply | FileReply:
+    def dispatch(self, req: Request) -> Reply | FileReply | StreamReply:
         if not security.host_ok(req.headers.get("Host"), self.port):
             return error_reply(421, "forbidden", "Hôte non autorisé.")
         if not security.fetch_site_ok(req.headers.get("Sec-Fetch-Site")):
             return error_reply(403, "forbidden", "Requête venue d'un autre site : refusée.")
         path = req.path
+        mutation = req.method not in ("GET", "HEAD")
         if path.startswith("/api/"):
-            if not security.token_ok(req.headers.get(security.TOKEN_HEADER), self.token):
+            # EventSource cannot send a header: the read-only event stream is protected by the
+            # Host and Sec-Fetch-Site checks, and no other site can read it (no CORS header).
+            if path != "/api/events" and not security.token_ok(req.headers.get(security.TOKEN_HEADER), self.token):
                 return error_reply(403, "forbidden", "Jeton de page manquant ou invalide : recharge la page.")
-            if req.method not in ("GET", "HEAD") and not security.origin_ok(req.headers.get("Origin"), self.port):
+            if mutation and not security.origin_ok(req.headers.get("Origin"), self.port):
                 return error_reply(403, "forbidden", "Origine refusée.")
+            if mutation and req.body and not security.json_type_ok(req.headers.get("Content-Type")):
+                return error_reply(415, "invalid_input", "Corps attendu en JSON (Content-Type: application/json).")
+        if path != "/api/events":
+            self.last_activity = time.monotonic()
         if path.startswith(("/api/", "/media/")):
             return api.dispatch(self, req)
         return self.static_reply(req)
@@ -159,10 +275,14 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self) -> None:
         app: App = self.server.app
         started = time.monotonic()
+        body = b""
         if self.command not in ("GET", "HEAD"):
-            self._drain_body()
+            body = self._read_body()
+            if body is None:
+                self._send(error_reply(413, "invalid_input", f"Corps trop gros (limite : {MAX_BODY // 1024} Kio)."))
+                return
         try:
-            reply = app.dispatch(Request(self.command, self.path, self.headers))
+            reply = app.dispatch(Request(self.command, self.path, self.headers, body))
         except Exception:
             log.exception("Erreur sur %s %s", self.command, self.path)
             reply = error_reply(500, "internal", "Erreur interne du serveur (détails dans server.log).")
@@ -175,26 +295,37 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
         log.info("%s %s %s %.0f ms", self.command, self.path, reply.status, (time.monotonic() - started) * 1000)
 
-    def _drain_body(self) -> None:
+    def _read_body(self) -> bytes | None:
+        """The request body, or None if it is too large (the connection is then closed)."""
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = -1
         if 0 <= length <= MAX_BODY:
-            self.rfile.read(length)
-        else:
-            self.close_connection = True
+            return self.rfile.read(length) if length else b""
+        self.close_connection = True
+        return None
 
-    def _send(self, reply: Reply | FileReply) -> None:
+    def _send(self, reply: Reply | FileReply | StreamReply) -> None:
         head = self.command == "HEAD"
         self.send_response(reply.status)
         headers = {**security.COMMON_HEADERS, "Content-Security-Policy": security.CSP, **reply.headers}
         if isinstance(reply, Reply):
             headers.setdefault("Content-Length", str(len(reply.body)))
+        if isinstance(reply, StreamReply):
+            headers["Connection"] = "close"
+            self.close_connection = True
         for name, value in headers.items():
             self.send_header(name, value)
         self.end_headers()
         if head or reply.status in (204, 304):
+            return
+        if isinstance(reply, StreamReply):
+            def write(data: bytes) -> None:
+                self.wfile.write(data)
+                self.wfile.flush()
+
+            reply.stream(write)
             return
         if isinstance(reply, FileReply):
             if reply.path is not None:

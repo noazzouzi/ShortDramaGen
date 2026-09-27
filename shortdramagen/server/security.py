@@ -59,3 +59,8 @@ def origin_ok(origin: str | None, port: int) -> bool:
 
 def token_ok(sent: str | None, expected: str) -> bool:
     return bool(sent) and hmac.compare_digest(sent.encode("utf-8", "replace"), expected.encode("ascii"))
+
+
+def json_type_ok(content_type: str | None) -> bool:
+    """Mutations carry JSON: an HTML form cannot send this type to another site without a preflight."""
+    return (content_type or "").split(";", 1)[0].strip().lower() == "application/json"

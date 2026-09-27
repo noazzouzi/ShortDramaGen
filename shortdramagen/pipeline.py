@@ -86,6 +86,7 @@ class FetchControl:
     strict_quality: bool = False  # never fall back to another quality (error quality_unavailable)
     on_event: EventHandler | None = None
     manifest_listener: Listener | None = None
+    record_request: bool = True  # False for a repair: the manifest keeps what the user first asked for
 
     def emit(self, name: str, **data) -> None:
         if self.on_event:
@@ -353,7 +354,7 @@ def fetch(
         "episodes": [list(r) for r in opts.episodes] if opts.episodes else None,
         "at": now_iso(),
     }
-    manifest = Manifest.open(series_dir, series, requested, control.manifest_listener)
+    manifest = Manifest.open(series_dir, series, requested if control.record_request else None, control.manifest_listener)
     _ensure_cover(http, series, series_dir, manifest, control)
     result = FetchResult(series, series_dir)
     counter = _Counter(len(episodes))

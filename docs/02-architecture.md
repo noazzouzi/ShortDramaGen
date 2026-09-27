@@ -437,9 +437,88 @@ mémorisé : `-o` au premier lancement, sinon `./downloads` comme `sdg fetch`.
 **Client** (`web/`) : HTML, CSS et modules ES natifs, sans build. Le DOM est
 construit sans `innerHTML` (aucune donnée interprétée comme du HTML) ni
 attribut `style` (CSP) : seules des variables CSS sont posées. Routeur par
-hash (`#/`, `#/serie/<id>/<vo|fr…>`, `…/lire/<n|film>`), rafraîchissement
-toutes les 5 s avec ETag tant que la page est visible (le temps réel en SSE
-arrive à l'étape 2).
+hash (`#/`, `#/serie/<id>/<vo|fr…>`, `…/lire/<n|film>`). Depuis l'étape 2,
+il suit le flux SSE (`EventSource`) : pilule d'activité dans l'en-tête,
+tuiles « en cours » avec leur barre, fiche rechargée (ETag) quand la
+bibliothèque change ; il ne revient au sondage (15 s) que si le flux est
+coupé.
+
+### 3.12 Jobs et temps réel (étape 2)
+
+Le serveur télécharge et crée les films lui-même, dans une **file de jobs**
+persistante, et pousse tout ce qui se passe en **SSE**. Tout se pilote au
+`curl` (le jeton est dans la balise `<meta name="sdg-token">` de la page) :
+
+```bash
+H="-H Host:127.0.0.1:8765 -H X-SDG-Token:$TOKEN -H Content-Type:application/json"
+curl $H -d '{"input": "https://www.dramaboxdb.com/fr/movie/41000105199/…"}' http://127.0.0.1:8765/api/preview
+curl $H -d '{"kind": "fetch", "input": "41000105199", "lang": "fr", "film_after": true}' http://127.0.0.1:8765/api/jobs
+curl $H -X POST http://127.0.0.1:8765/api/jobs/j-7f3a2c/pause      # puis /resume ou /cancel
+curl -N -H Host:127.0.0.1:8765 http://127.0.0.1:8765/api/events    # le flux, sans jeton (lecture seule)
+```
+
+**`jobs.py`**
+- **États** : `queued` → `running` → `done` ou `failed` ; `running` →
+  `pausing` → `paused` ; `running` → `cancelling` → `cancelled` ; `running` →
+  `interrupted` (serveur arrêté, ou réseau coupé). `resume` remet en file un
+  job en pause, interrompu ou en échec.
+- **Deux voies** : téléchargements (`concurrent_series` séries à la fois, 1
+  par défaut, chacune avec `parallel_downloads` épisodes en parallèle) et
+  films (1 à la fois). Deux jobs ne touchent jamais la même série en même
+  temps ; un seul `RateLimiter` est partagé par tous les jobs.
+- **Doublons** refusés (`409 duplicate_job`) sur `(book_id, langue)` ou sur
+  la série.
+- **Pause** : `stop` du `FetchControl` ; les épisodes finis et les `.part`
+  restent, la reprise repart à l'octet près. **Annuler** supprime les
+  `.part` (sauf `delete_parts: false`), jamais les épisodes finis.
+- **Persistance** : `<downloads>/.sdg/jobs.json`, réécrit atomiquement à
+  chaque changement d'état (jamais pour la progression), 100 jobs d'historique.
+  Au démarrage, un job `running` devient `interrupted`, puis repasse en file
+  en tête si `resume_on_start` (par défaut) : un `sdg ui` fermé en plein
+  téléchargement reprend tout seul au lancement suivant.
+- **Hors ligne mesuré** (`connectivity.py` : le site officiel et la source
+  sont contactés) : un job qui échoue faute de réseau passe en `interrupted`
+  avec la raison `offline`, sans compter d'échec, et repart tout seul quand
+  la connexion revient (nouvelle mesure toutes les 15 s).
+- **Enchaînement** : `film_after` crée un job film à la fin du
+  téléchargement, seulement s'il n'y a eu aucun échec ; un film obsolète est
+  alors reconstruit, un film à jour réutilisé.
+- **Réparations** : `record_request=False` (nouvelle option de
+  `FetchControl`) garde dans le manifest la sélection d'origine, pour qu'un
+  « Réessayer l'épisode 28 » ne fasse pas passer les autres en « non demandé ».
+- **Progression** (en mémoire) : octets reçus et total (estimé avec les
+  durées officielles et le débit mesuré de la série), vitesse lissée,
+  temps restant après 3 s de mesure ; publiée au plus 4 fois par seconde.
+
+**`events.py`** : bus numéroté avec un tampon de 1000 événements. Le flux
+`/api/events` envoie un `snapshot` à la connexion (jobs, versions, santé),
+puis `job`, `progress` (jamais rejoué), `episode`, `log`, `library`,
+`health`, `settings`, `server`, et un `: ping` toutes les 15 s. À la
+reconnexion, `Last-Event-ID` rejoue ce qui a été manqué, sinon un nouveau
+snapshot est envoyé. Un client trop lent est déconnecté (file de 1000).
+
+**Autres routes** (`server/actions.py`) :
+
+| Route | Rôle |
+|---|---|
+| `POST /api/preview` | Aperçu d'un lien (site officiel + 1 appel à la source, jamais de sonde, cache de 15 min) : titre, durée, qualités, estimation, versions déjà présentes, job en cours ; `/media/preview/<id>/<langue>/cover` sert l'affiche |
+| `POST /api/jobs` · `GET /api/jobs[/{id}]` · `POST /api/jobs/{id}/pause\|resume\|cancel` · `DELETE /api/jobs/{id}` | La file |
+| `POST /api/series/{key}/retry` | Réessayer les échecs, indisponibles, manquants et interrompus ; « Compléter » avec `include_pending` ; « Réparer puis créer le film » avec `redownload`, `quality` et `film_after` |
+| `POST /api/series/{key}/redownload` | Retélécharger des épisodes dans une qualité (l'ancien fichier reste jusqu'à ce que le nouveau soit vérifié) |
+| `POST /api/repair` | « Tout réparer » : seulement les actions sûres, `dry_run` pour le devis |
+| `GET /api/series/{key}/film/plan` · `POST /api/series/{key}/film` | Pré-vol du film (`plan_summary`) et création ; les contrôles sont faits tout de suite (`ffmpeg_missing`, `film_missing_episodes`, `film_mixed_formats`, `409 film_exists`), un film à jour est simplement réutilisé |
+| `DELETE /api/series/{key}?scope=all\|episodes\|film\|parts` · `POST /api/trash/{id}/restore` | Suppression annulable (`trash.py`) : déplacement vers `.sdg/trash/`, vidé après `trash_minutes` et à l'arrêt ; les épisodes passent en `removed` et le film reste ; `409` pendant un job, `423 file_locked` si Windows bloque un fichier |
+| `POST /api/series/{key}/open` | Dossier, film ou épisode dans l'Explorateur, ou lecture dans le lecteur par défaut (`desktop.py`, chemins validés par l'index) |
+| `POST /api/series/{key}/ignore` | Masquer un problème d'« À traiter » (`.sdg/ignored.json`) |
+| `POST /api/library/rescan` | Relire le disque |
+| `PATCH /api/settings` | Réglages validés ; changer de dossier est refusé pendant un téléchargement, sinon la bibliothèque, la file et la corbeille suivent |
+| `POST /api/shutdown` | Arrêt (les téléchargements en cours reprendront au lancement suivant) |
+
+Toute mutation exige le jeton, une `Origin` locale si elle est présente et
+un corps JSON (`415` sinon, `413` au-delà de 64 Kio). Le serveur ne contacte
+jamais une URL donnée par le client : il n'en garde que le numéro de série.
+Il s'arrête tout seul après `auto_shutdown_minutes` (10 par défaut) sans
+onglet ouvert ni téléchargement.
 
 ## 4. Séquence d'un `sdg fetch`
 
@@ -498,9 +577,14 @@ shortdramagen/
 ├── film.py          # fusion en un seul film (ffmpeg) + chapitres
 ├── manifest.py      # état par série
 ├── pipeline.py      # orchestration, FetchControl, aperçu
-├── library.py       # index de la bibliothèque (sdg ui)
+├── library.py       # index de la bibliothèque (sdg ui), problèmes ignorés
 ├── settings.py      # réglages, secret, instance du serveur
-├── server/          # sdg ui : app, api, media (Range), security, launch
+├── events.py        # bus d'événements (SSE)
+├── jobs.py          # file de jobs : voies, pause, reprise, progression
+├── connectivity.py  # mesure de la connexion
+├── trash.py         # suppression annulable
+├── desktop.py       # ouvrir dans l'Explorateur / le lecteur
+├── server/          # sdg ui : app, api, actions, media (Range), security, launch
 └── web/             # client : index.html, app.css, js/ (vues bibliothèque, fiche, théâtre)
 tests/
 ├── fakes.py         # FakeHttp, générateur de MP4 (pistes, avcC, esds, edit lists)

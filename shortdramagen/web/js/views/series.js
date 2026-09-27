@@ -104,7 +104,19 @@ function healthBar(group, detail) {
   const parts = [];
   let tone = "ok";
   let glyph = "check";
-  if (detail.state === "complete") {
+  const job = detail.job;
+  if (job && job.kind === "fetch" && ["active", "queued", "paused"].includes(detail.state)) {
+    tone = detail.state === "paused" ? "warning" : "info";
+    glyph = detail.state === "paused" ? "pause" : detail.state === "queued" ? "clock" : "arrowDown";
+    const label = { active: "Téléchargement en cours", queued: job.position ? `En file · ${job.position}e` : "En file", paused: "En pause" }[detail.state];
+    parts.push(`${label} · ${k.present}/${k.total}`);
+    if (c.downloading) parts.push(`${c.downloading} en cours`);
+    if (c.queued) parts.push(`${c.queued} en attente`);
+  } else if (job && job.kind === "film") {
+    tone = "info";
+    glyph = "film";
+    parts.push(job.status === "running" ? "Création du film en cours" : "Film en file");
+  } else if (detail.state === "complete") {
     parts.push(`${k.present}/${k.total} téléchargés${detail.from_official ? " et vérifiés" : ""}`);
     if (detail.duration_s) parts.push(duration(detail.duration_s));
     parts.push(bytes(detail.episodes_bytes));
@@ -170,6 +182,8 @@ function tile(ep, main, onActivate, onFocus) {
 function episodesSection(detail, onActivate, onFocus) {
   const main = majorityQuality(detail);
   const legendItems = [
+    ["downloading", "badge-active", "En cours"],
+    ["queued", "badge", "En file"],
     ["done", "badge-success", "Téléchargés"],
     ["done_unverified", "badge-success", "Non vérifiés"],
     ["partial", "badge-warning", "Interrompus"],

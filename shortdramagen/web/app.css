@@ -122,6 +122,16 @@ svg.icon.is-solid { fill: currentColor; stroke: none; }
 .health-dot.is-danger { background: var(--danger); }
 .popover { position: absolute; right: var(--gutter); top: 60px; z-index: 60; display: flex; flex-direction: column; gap: 12px; width: 400px; max-width: calc(100vw - 32px); padding: 16px; border-radius: 10px; background: var(--s2); box-shadow: var(--e2), 0 0 0 1px var(--border-subtle); }
 .popover[hidden] { display: none; }
+.pill { display: inline-flex; align-items: center; gap: 6px; max-width: 360px; height: 32px; padding: 0 12px 0 8px; border-radius: 999px; border: 1px solid var(--border-default); background: var(--s2); color: var(--text); font-size: 13px; line-height: 18px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pill[hidden] { display: none; }
+.pill:hover { background: var(--s3); color: var(--text); text-decoration: none; }
+.pill.is-warning { color: var(--warning); }
+.pill.is-warning:hover { color: var(--warning); }
+.pill span { overflow: hidden; text-overflow: ellipsis; }
+.ring { flex: none; width: 16px; height: 16px; }
+.ring circle { fill: none; stroke-width: 2.5; }
+.ring-track { stroke: var(--s3); }
+.ring-bar { stroke: var(--active); stroke-linecap: round; }
 .banner-zone:empty { display: none; }
 .banner { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 8px var(--gutter); font-size: 14px; }
 .banner-info { background: var(--info-subtle); color: var(--text); }
@@ -237,6 +247,9 @@ svg.icon.is-solid { fill: currentColor; stroke: none; }
 .tile[data-status="partial"] { background: var(--warning-subtle); border: 2px solid var(--warning); color: var(--text); }
 .tile[data-status="partial"] .glyph { color: var(--warning); }
 .tile[data-status="downloading"] { background: var(--active-subtle); border: 2px solid var(--active); color: var(--text); }
+.tile[data-status="downloading"]::before, .tile[data-status="downloading"]::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: 4px; height: 4px; border-radius: 2px; }
+.tile[data-status="downloading"]::before { background: var(--s3); }
+.tile[data-status="downloading"]::after { background: var(--active); transform-origin: left center; transform: scaleX(var(--p, 0)); transition: transform 240ms linear; }
 .tile[data-status="queued"] { background: var(--s2); border: 1px solid var(--border-control); color: var(--text); }
 .tile[data-status="pending"] { border: 1px dashed var(--border-control); color: var(--text-2); }
 .tile[data-status="not_requested"] { color: var(--text-3); }
@@ -330,6 +343,7 @@ details.tech > div { display: flex; flex-direction: column; gap: 16px; padding: 
 @media (max-width: 599px) {
   :root { --gutter: 16px; }
   .topbar { gap: 8px; }
+  .pill { max-width: 150px; }
   .logo span { display: none; }
   .topbar .field { width: auto; flex: 1; margin-left: 0; }
   .wall { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 24px 12px; }

@@ -132,7 +132,7 @@ class ApiTest(ServerTest):
     def test_health_and_settings(self):
         status, health = self.json("/api/health")
         self.assertEqual(status, 200)
-        self.assertEqual((health["api"], health["read_only"], health["downloads_dir"]), (1, True, str(self.root)))
+        self.assertEqual((health["api"], health["read_only"], health["downloads_dir"]), (1, False, str(self.root)))
         self.assertIn("found", health["ffmpeg"])
         status, data = self.json("/api/settings")
         self.assertEqual((data["downloads_dir"], data["default_quality"], data["version"]), (str(self.root), "best", 1))

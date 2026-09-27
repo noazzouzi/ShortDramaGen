@@ -8,11 +8,12 @@
 import { get } from "./api.js";
 import { h, icon, clear, announce, codeBox } from "./dom.js";
 import { bytes } from "./format.js";
+import { activity, applyJobEvent, connectEvents, renderPill } from "./live.js";
 import { renderLibrary, seriesHref, mainVersion } from "./views/library.js";
 import { renderSeries, renderMissing } from "./views/series.js";
 import { openTheater } from "./views/theater.js";
 
-const POLL_MS = 5000;
+const FALLBACK_POLL_MS = 15000; // seulement si le flux d'événements est coupé
 const HEALTH_MS = 60000;
 
 const state = {
@@ -24,7 +25,11 @@ const state = {
   unreachable: false,
   query: "",
   selected: new Map(), // series_key -> épisode affiché dans le volet
+  jobs: { active: [], history: [] },
+  progress: {}, // job_id -> dernier événement progress
+  live: false, // flux SSE ouvert
 };
+let baseTitle = "ShortDramaGen";
 
 let view = { name: null, key: null }; // ce qui est affiché dans <main>
 let theater = null; // { target, key, handle }
@@ -145,7 +150,7 @@ function buildTopbar() {
   bar.append(
     h("a", { class: "logo", href: "#/" }, h("img", { src: "/icon.svg", alt: "" }), h("span", { text: "ShortDramaGen" })),
     h("label", { class: "field" }, icon("search"), search),
-    h("div", { class: "topbar-end" }, healthButton),
+    h("div", { class: "topbar-end" }, h("a", { class: "pill", id: "activite", hidden: true }), healthButton),
     popover,
   );
 }
@@ -168,10 +173,11 @@ function renderHealth() {
       row(hl.downloads_dir_ok, "Dossier", hl.downloads_dir_ok ? "accessible" : "introuvable"),
       row(null, "Espace libre", hl.free_bytes === null ? "—" : bytes(hl.free_bytes)),
       row(ffmpeg.found, "ffmpeg", ffmpeg.found ? `prêt (${ffmpeg.source})` : "absent : nécessaire pour créer un film"),
+      row(hl.online === null || hl.online === undefined ? null : hl.online, "Connexion", hl.online === false ? "hors ligne" : hl.online ? "en ligne" : "vérification…"),
+      row(null, "Tâches", hl.jobs ? `${hl.jobs.running} en cours · ${hl.jobs.queued} en file` : "—"),
       row(null, "Version", `${hl.version}`),
     ),
     codeBox(hl.downloads_dir, "Copier le chemin du dossier"),
-    h("p", { class: "note", text: hl.read_only ? "Cette version de l'interface sert à parcourir et à regarder. Les téléchargements et la création de films se lancent encore depuis un terminal." : "" }),
   );
 }
 
@@ -222,7 +228,7 @@ async function render(soft = false) {
       onRetry: () => refresh(true),
     });
     view = { name: "library", key: null };
-    document.title = "Bibliothèque · ShortDramaGen";
+    setTitle("Bibliothèque · ShortDramaGen");
     if (!same) {
       scrollTo(0, scrolls.get("library") || 0);
       if (!soft) focusHeading();
@@ -272,7 +278,7 @@ async function render(soft = false) {
     scrollTo(0, y);
     if (!sameView) {
       view = { name: "series", key: version.series_key };
-      document.title = `${detail.title} · ShortDramaGen`;
+      setTitle(`${detail.title} · ShortDramaGen`);
       if (!route.play) focusHeading();
     }
   }
@@ -296,7 +302,7 @@ function showTheater(group, version, detail, target) {
   main.inert = true;
   document.getElementById("topbar").inert = true;
   theater = { target, key: version.series_key, handle };
-  document.title = `${target === "film" ? "Film" : `Épisode ${target}`} · ${detail.title}`;
+  setTitle(`${target === "film" ? "Film" : `Épisode ${target}`} · ${detail.title}`);
   handle.focus();
 }
 
@@ -311,6 +317,111 @@ function closeTheater(restoreFocus = false) {
     const tile = target !== "film" && main.querySelector(`.tile[data-n="${CSS.escape(String(target))}"]`);
     (tile || main.querySelector("[data-autofocus]") || main).focus({ preventScroll: Boolean(tile) });
   }
+}
+
+// --- temps réel ---------------------------------------------------------------------------
+
+function setTitle(title) {
+  baseTitle = title;
+  updateActivity();
+}
+
+function jobHref(job) {
+  for (const group of state.library?.groups || []) {
+    const version = group.versions.find((v) => v.series_key === job.series_key);
+    if (version) return seriesHref(group, version);
+  }
+  return null;
+}
+
+function updateActivity() {
+  const info = activity(state.jobs, state.progress);
+  const pill = document.getElementById("activite");
+  if (pill) renderPill(pill, info, jobHref);
+  const running = info && info.job?.status === "running" && info.job.kind === "fetch" && state.progress[info.job.id];
+  const e = running?.episodes;
+  document.title = e ? `(${(e.done || 0) + (e.skipped || 0)}/${e.total}) ${baseTitle}` : baseTitle;
+}
+
+// Tuiles des épisodes en cours : barre de progression sans reconstruire la fiche.
+function updateTiles(progress) {
+  if (view.name !== "series" || !progress.episodes?.active) return;
+  const job = state.jobs.active.find((j) => j.id === progress.job_id);
+  if (!job || job.series_key !== view.key) return;
+  const active = new Set(progress.episodes.active.map((a) => a.n));
+  for (const tile of main.querySelectorAll(".tile[data-live]")) {
+    if (!active.has(Number(tile.dataset.n))) {
+      tile.dataset.status = tile.dataset.was; // fini ou arrêté : la fiche se met à jour juste après
+      delete tile.dataset.live;
+    }
+  }
+  for (const { n, bytes: done, total } of progress.episodes.active) {
+    const tile = main.querySelector(`.tile[data-n="${n}"]`);
+    if (!tile) continue;
+    if (!tile.dataset.live) {
+      tile.dataset.was = tile.dataset.status === "downloading" ? "queued" : tile.dataset.status;
+      tile.dataset.live = "1";
+    }
+    tile.dataset.status = "downloading";
+    tile.style.setProperty("--p", total ? Math.min(1, done / total).toFixed(3) : "0");
+  }
+}
+
+let refreshTimer = null;
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => refresh(), 300);
+}
+
+function startEvents() {
+  connectEvents({
+    open() {
+      state.live = true;
+      setReachable(true);
+    },
+    lost() {
+      state.live = false;
+      setReachable(false);
+    },
+    snapshot(data) {
+      state.jobs = data.jobs;
+      state.health = data.health;
+      renderHealth();
+      updateActivity();
+      if (data.library_version !== state.library?.version) scheduleRefresh();
+    },
+    job(data) {
+      const before = state.jobs.active.find((j) => j.id === data.job.id);
+      state.jobs = applyJobEvent(state.jobs, data);
+      if (data.op !== "updated" || !["running", "queued"].includes(data.job.status)) delete state.progress[data.job.id];
+      if (before && data.job.status === "done") announce(`Terminé : ${data.job.title || "tâche"}.`);
+      updateActivity();
+      scheduleRefresh();
+    },
+    progress(data) {
+      state.progress[data.job_id] = data;
+      updateActivity();
+      updateTiles(data);
+    },
+    library: scheduleRefresh,
+    health(data) {
+      state.health = { ...(state.health || {}), ...data };
+      renderHealth();
+      if (data.online === false) showBanner("info", "Hors ligne. Ta bibliothèque et tes vidéos restent disponibles ; les téléchargements reprendront tout seuls.");
+      else if (data.online === true && !state.unreachable) showBanner(null, null);
+    },
+    settings(data) {
+      state.settings = data.settings;
+      applyTheme();
+      scheduleRefresh();
+    },
+    server(data) {
+      if (data.op === "shutdown") {
+        state.unreachable = true;
+        showBanner("danger", "ShortDramaGen s'est arrêté. Relance sdg ui pour continuer ; les téléchargements reprendront là où ils en étaient.");
+      }
+    },
+  });
 }
 
 // --- rafraîchissement ---------------------------------------------------------------------
@@ -331,7 +442,7 @@ async function refresh(force = false) {
 }
 
 function startPolling() {
-  setInterval(() => { if (document.visibilityState === "visible") refresh(); }, POLL_MS);
+  setInterval(() => { if (!state.live && document.visibilityState === "visible") refresh(); }, FALLBACK_POLL_MS);
   setInterval(() => { if (document.visibilityState === "visible") loadHealth(); }, HEALTH_MS);
   addEventListener("focus", () => refresh());
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
@@ -366,6 +477,7 @@ async function start() {
   await render(parseRoute().name === "library");
   if (state.library) announce(`Bibliothèque chargée : ${count} série${count > 1 ? "s" : ""}.`);
   addEventListener("hashchange", () => render());
+  startEvents();
   startPolling();
 }
 

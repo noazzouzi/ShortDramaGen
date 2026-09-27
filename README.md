@@ -81,7 +81,7 @@ python -m shortdramagen film "downloads/41000105199-one-night-to-forever" -f "C:
   épisodes, aucun modifié depuis), il est simplement réutilisé ; sinon l'outil
   refuse. `--replace` le reconstruit, `-f` choisit un autre nom.
 
-### Interface web : parcourir et regarder
+### Interface web
 
 ```bash
 python -m shortdramagen ui                       # ouvre http://127.0.0.1:8765/ dans le navigateur
@@ -97,14 +97,18 @@ python -m shortdramagen ui --window              # fenêtre d'application Edge/C
   place occupée et la commande à lancer pour réparer.
 - **Lecture** dans le navigateur, épisode par épisode (enchaînement
   automatique) ou le film avec ses chapitres.
+- **En direct** : la progression s'affiche dans l'en-tête (« ↓ 21/80 · ≈ 1 min »)
+  et dans le titre de l'onglet, les épisodes se colorent au fur et à mesure.
+- **Le serveur télécharge lui-même** : file de téléchargements et de films,
+  pause, reprise à l'octet près, annulation, réparation, suppression
+  annulable. Si tu fermes la fenêtre ou si Internet coupe, tout reprend tout
+  seul ensuite. Ces actions ont leur API ([architecture §3.12](docs/02-architecture.md#312-jobs-et-temps-réel-étape-2)) ;
+  les boutons correspondants arrivent avec la prochaine version de
+  l'interface. En attendant, la fiche affiche la commande `fetch` ou `film`
+  à copier.
 - Tout reste **local** : le serveur n'écoute que sur `127.0.0.1` et refuse
   les requêtes des autres sites. Les liens signés de la source ne sont
   jamais affichés.
-
-Pour l'instant, l'interface sert à **parcourir et regarder**. Les
-téléchargements et la création de films se lancent encore avec `fetch` et
-`film` ; ce qui est téléchargé apparaît tout seul dans l'interface, sans
-recharger la page.
 
 **Entrées acceptées** : URL `dramaboxdb.com` (série ou épisode, avec ou sans
 `/fr/`), `dramabox.com/drama/…`, lien de partage de l'app, URL dramafren
@@ -151,12 +155,12 @@ downloads/41000105199-one-night-to-forever-fr/
 | [01 — Étude technique](docs/01-etude-technique.md) | Constats vérifiés : API dramafren, CDN, site officiel, formats d'URL, cadre légal |
 | [02 — Architecture](docs/02-architecture.md) | Composants, flux, manifest, moteur pilotable (événements, codes d'erreur), choix techniques |
 | [03 — Brainstorm & roadmap](docs/03-brainstorm-et-roadmap.md) | Approches comparées, risques, plans B, suite |
-| [04 — Frontend](docs/04-frontend.md) | Interface web : recherche, 3 concepts et jury, spec, système visuel, API, maquette, avancement (étapes 0 et 1 livrées) |
+| [04 — Frontend](docs/04-frontend.md) | Interface web : recherche, 3 concepts et jury, spec, système visuel, API, maquette, avancement (étapes 0 à 2 livrées) |
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests      # 106 tests, hors ligne, environ 2 s
+python -m unittest discover -s tests      # 131 tests, hors ligne, environ 10 s
 # (4 tests de fusion utilisent un vrai ffmpeg ; ils sont ignorés s'il est absent)
 ```
 

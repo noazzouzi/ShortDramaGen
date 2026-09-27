@@ -10,6 +10,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
+import time
 import webbrowser
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
@@ -156,7 +158,7 @@ def run_ui(
         return 2
     library = LibraryIndex(settings.downloads_dir())
     library.refresh(force=True)
-    app = App(settings, library, load_secret(state))
+    app = App(settings, library, load_secret(state), state=state)
     try:
         server = bind(app, port)
     except OSError as e:
@@ -164,6 +166,8 @@ def run_ui(
         return 1
     url = f"http://127.0.0.1:{app.port}/"
     setup_logging(state)
+    requeued = app.start()
+    app.on_shutdown = server.shutdown
     write_server_info(
         {
             "pid": os.getpid(),
@@ -176,15 +180,31 @@ def run_ui(
     )
     log(f"ShortDramaGen {__version__} : {url}")
     log(f"Bibliothèque : {settings.downloads_dir()} ({len(library.keys())} dossier(s) de série)")
+    if requeued:
+        log(f"Reprise de {len(requeued)} téléchargement(s) interrompu(s).")
     log("Laisse cette fenêtre ouverte pendant que tu utilises l'interface ; Ctrl+C pour arrêter.")
     if open_browser:
         open_interface(url, window)
     _stop_on_sigterm()
+    threading.Thread(target=_auto_shutdown, args=(app, server, log), name="sdg-idle", daemon=True).start()
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
-        log("Interface arrêtée.")
+        pass
     finally:
+        log("Arrêt : les téléchargements en cours reprendront au prochain lancement.")
+        app.close()
         server.server_close()
         clear_server_info(os.getpid(), state)
     return 0
+
+
+def _auto_shutdown(app: App, server: Server, log: Callable[[str], None], interval: float = 30.0) -> None:
+    """Stop after N minutes with no open tab and nothing to download (settings: auto_shutdown_minutes)."""
+    while not app.closing:
+        time.sleep(interval)
+        minutes = app.settings["auto_shutdown_minutes"]
+        if minutes and app.idle_seconds() >= minutes * 60:
+            log(f"Aucun onglet ouvert ni téléchargement depuis {minutes} min : arrêt automatique.")
+            server.shutdown()
+            return

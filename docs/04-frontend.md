@@ -118,7 +118,7 @@ Contrat d'API complet (routes, charges utiles, événements SSE) : [spec-v1.md �
 |---|---|---|
 | **0. Moteur pilotable** ✅ fait | Annulation injectable, événements de progression (octets, épisodes), codes d'erreur stables, option `force`, aperçu sans téléchargement, `make_film` réutilisable. La CLI garde ses commandes et les tests existants passent. | 1,5 j |
 | **1. Serveur en lecture seule** ✅ fait | `sdg ui`, bibliothèque, fiches, lecture des médias, plus un premier client en lecture | 1,5 j |
-| **2. Jobs et temps réel** | File, SSE, pause, reprise, réparation, film, corbeille, réglages | 2 j |
+| **2. Jobs et temps réel** ✅ fait | File, SSE, pause, reprise, réparation, film, corbeille, réglages | 2 j |
 | **3. Client MVP** | Tous les écrans de la maquette | 4 à 5 j |
 | V1.1 | Catalogue des langues, « Continuer à regarder », nouveaux épisodes, notifications Windows, zip portable | 2 j |
 | V2 | Accès depuis le téléphone (réseau local authentifié), `.exe`, 2 séries en parallèle | — |
@@ -209,6 +209,54 @@ les réglages).
 - arrêt automatique sans client, aperçu d'une URL et covers d'aperçu :
   étape 2, avec les jobs ;
 - une série sondée (absente du site officiel) s'affiche « Série <numéro> ».
+
+### Étape 2 : livrée
+
+Le serveur télécharge, crée les films et pousse tout en temps réel.
+Critère de fin atteint : **cycle complet au `curl`** sur le vrai réseau.
+Description technique : [architecture §3.12](02-architecture.md#312-jobs-et-temps-réel-étape-2).
+
+Déroulé vérifié (VF de *One Night to Forever*, dossier vierge) :
+1. **aperçu** du lien dramafren en VF : titre, 62 épisodes, 1 h 32,
+   1080p/720p/540p, estimation, affiche servie en local ;
+2. **ajout** des épisodes 1 à 4, puis refus du doublon (`409 duplicate_job`) ;
+3. **Compléter** (58 épisodes), **pause** en plein transfert (3 `.part`
+   gardés, aucun épisode laissé en `downloading`), **reprise** ;
+4. **arrêt du serveur** (SIGTERM) en plein téléchargement : job
+   `interrupted`, puis repris tout seul au lancement suivant et terminé
+   (51 téléchargés, 11 déjà là, 0 échec) ;
+5. **annulation** d'un autre téléchargement : `.part` supprimés, épisode
+   terminé conservé ;
+6. **réparation** après suppression d'un épisode dans l'explorateur de
+   fichiers : seul cet épisode est retéléchargé (« Compléter » n'est jamais
+   proposé automatiquement) ;
+7. **film** : pré-vol vert, création en quelques secondes (62 chapitres,
+   717 Mo), puis réutilisé tel quel à la demande suivante ;
+8. **corbeille** (suppression de la VO puis restauration), **réglages**
+   (`422` avec le nom du champ fautif), **arrêt** par l'API.
+
+Le flux SSE enregistré pendant ce temps : `snapshot`, puis 17 `job`,
+115 `progress`, 235 `episode`, 86 `library`, 73 `log`, des `: ping`, des
+identifiants croissants et aucune URL signée.
+
+Le client suit maintenant ce flux : pilule d'activité (« ↓ 47/62 · moins
+d'une minute »), compteur dans le titre de l'onglet, tuiles « en cours »
+avec leur barre, fiche mise à jour en direct, bandeau hors ligne. Les
+boutons d'action (ajouter, mettre en pause, réparer, créer le film,
+supprimer) arrivent avec l'étape 3.
+
+Tests : 131 hors ligne (25 nouveaux : bus d'événements, file et
+redémarrage, pause au milieu d'un transfert, annulation, hors ligne puis
+reprise, réparation, film, corbeille, aperçu, réglages, flux SSE).
+
+Écarts par rapport au plan :
+- la pause d'un film en cours de création l'arrête ; à la reprise, il est
+  recréé depuis le début (ffmpeg ne sait pas reprendre) ;
+- la vitesse et le temps restant sont mesurés par job ; les estimations 720p
+  et 540p restent approximatives (débit 1080p par défaut, puis débit mesuré
+  de la série) ;
+- l'ouverture dans le lecteur par défaut et l'Explorateur ne sont testées
+  que par simulation (la vérification réelle se fera sous Windows).
 
 Détails de la recherche : [brainstorm/1-recherche-capacites-du-moteur.md](frontend/brainstorm/1-recherche-capacites-du-moteur.md).
 
