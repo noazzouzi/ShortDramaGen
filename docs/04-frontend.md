@@ -117,7 +117,7 @@ Contrat d'API complet (routes, charges utiles, événements SSE) : [spec-v1.md �
 | Étape | Contenu | Estimation |
 |---|---|---|
 | **0. Moteur pilotable** ✅ fait | Annulation injectable, événements de progression (octets, épisodes), codes d'erreur stables, option `force`, aperçu sans téléchargement, `make_film` réutilisable. La CLI garde ses commandes et les tests existants passent. | 1,5 j |
-| **1. Serveur en lecture seule** | `sdg ui`, bibliothèque, fiches, lecture des médias | 1,5 j |
+| **1. Serveur en lecture seule** ✅ fait | `sdg ui`, bibliothèque, fiches, lecture des médias, plus un premier client en lecture | 1,5 j |
 | **2. Jobs et temps réel** | File, SSE, pause, reprise, réparation, film, corbeille, réglages | 2 j |
 | **3. Client MVP** | Tous les écrans de la maquette | 4 à 5 j |
 | V1.1 | Catalogue des langues, « Continuer à regarder », nouveaux épisodes, notifications Windows, zip portable | 2 j |
@@ -163,6 +163,52 @@ Tests : 70, hors ligne (4 utilisent ffmpeg et sont ignorés s'il est absent).
 - le statut `removed` arrivera avec la corbeille, à l'étape 2 ;
 - la CLI protège le film existant (`--replace`) au lieu de garder l'ancien
   écrasement silencieux.
+
+### Étape 1 : livrée
+
+`sdg ui` ouvre l'interface sur `http://127.0.0.1:8765/`. Critère de fin
+atteint : on parcourt les téléchargements existants et on lit les épisodes
+et le film dans le navigateur. Description technique :
+[architecture §3.11](02-architecture.md#311-interface-locale--sdg-ui-étape-1-lecture-seule).
+
+- **Serveur** (`server/`) : API `health`, `library` (ETag), `series`,
+  `settings` ; médias avec `Range` plafonné à 8 Mio, `HEAD`, `If-Range`,
+  téléchargement avec nom accentué ; `chapters.vtt` ; fichiers statiques.
+- **Sécurité** : écoute locale seulement, contrôle de `Host` et de
+  `Sec-Fetch-Site`, jeton de page sur l'API, CSP stricte ; chemins toujours
+  reconstruits par l'index et confinés au dossier de la série ; aucune URL
+  signée exposée (même dans les messages d'erreur).
+- **Bibliothèque** (`library.py`) : réconciliation manifest / disque (table
+  §10.1 de la spec), états de version et de film (`ready`, `partial`,
+  `stale`, `missing_file`, `outside`), regroupement des versions par
+  `book_id`, dossiers illisibles signalés sans bloquer le reste.
+- **Lancement** : instance unique (un second `sdg ui` rouvre simplement le
+  navigateur), port 8765 puis 8766 à 8775, `--window` (Edge ou Chrome en mode
+  application), dossier mémorisé, arrêt propre (`server.json` nettoyé).
+- **Client** (`web/`, sans build) : bibliothèque (mur d'affiches, stats,
+  filtres, recherche, tri), fiche (héros, onglets de version, barre de santé,
+  grille décimale avec tous les statuts, volet de détail, film, stockage,
+  détails techniques), Théâtre (épisodes avec précédent / suivant et
+  enchaînement automatique, film avec chapitres, raccourcis Échap, Espace,
+  ←/→, Maj+←/→, F, M). Responsive jusqu'à 390 px, thème sombre.
+
+Vérifié dans Chromium sur les vrais épisodes (lecture H.264/AAC, chapitres,
+focus rendu à la tuile à la fermeture, aucune erreur console) et sur une
+bibliothèque de démonstration couvrant tous les statuts. Tests : 106, hors
+ligne (dont 36 nouveaux pour l'index, le serveur, la sécurité, les médias et
+les réglages).
+
+Écarts par rapport au plan :
+- **un premier client est déjà là** (prévu à l'étape 3) : il en est la base,
+  en lecture seule. Les actions (télécharger, réparer, créer le film,
+  supprimer) affichent pour l'instant la commande équivalente à copier ;
+- **rafraîchissement toutes les 5 s avec ETag** en attendant le SSE de
+  l'étape 2 : un `sdg fetch` lancé dans un terminal apparaît tout seul ;
+- polices IBM Plex pas encore auto-hébergées (repli sur Segoe UI sous
+  Windows) : étape 3 ;
+- arrêt automatique sans client, aperçu d'une URL et covers d'aperçu :
+  étape 2, avec les jobs ;
+- une série sondée (absente du site officiel) s'affiche « Série <numéro> ».
 
 Détails de la recherche : [brainstorm/1-recherche-capacites-du-moteur.md](frontend/brainstorm/1-recherche-capacites-du-moteur.md).
 

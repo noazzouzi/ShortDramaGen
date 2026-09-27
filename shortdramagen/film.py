@@ -381,7 +381,7 @@ def build_film(
         )
     os.replace(tmp_output, output)
     result = FilmResult(output, duration, output.stat().st_size, mode, len(plan.parts) if chapters else 0)
-    _record_in_manifest(plan, result)
+    _record_in_manifest(plan, result, chapter_marks(plan, reencode) if chapters else [])
     return result
 
 
@@ -456,20 +456,27 @@ def concat_list_text(plan: FilmPlan) -> str:
     return "\n".join(lines) + "\n"
 
 
+def chapter_marks(plan: FilmPlan, reencode: bool = False) -> list[tuple[int, float, float]]:
+    """(episode, start, end) in seconds for each chapter, back to back."""
+    marks, start = [], 0.0
+    for part in plan.parts:
+        end = start + plan.segment(part, reencode)
+        marks.append((part.number, start, end))
+        start = end
+    return marks
+
+
 def ffmetadata(plan: FilmPlan, chapters: bool = True, reencode: bool = False) -> str:
     lines = [";FFMETADATA1", f"title={_escape_meta(plan.title)}"]
     if chapters:
-        start = 0.0
-        for part in plan.parts:
-            end = start + plan.segment(part, reencode)
+        for number, start, end in chapter_marks(plan, reencode):
             lines += [
                 "[CHAPTER]",
                 "TIMEBASE=1/1000",
                 f"START={round(start * 1000)}",
                 f"END={round(end * 1000)}",
-                f"title={_escape_meta(f'Épisode {part.number}')}",
+                f"title={_escape_meta(f'Épisode {number}')}",
             ]
-            start = end
     return "\n".join(lines) + "\n"
 
 
@@ -549,7 +556,7 @@ def _run_ffmpeg(
             raise FilmError("ffmpeg a échoué :\n  " + "\n  ".join(details or [f"code {code}"]), errors.FILM_FAILED)
 
 
-def _record_in_manifest(plan: FilmPlan, result: FilmResult) -> None:
+def _record_in_manifest(plan: FilmPlan, result: FilmResult, marks: list[tuple[int, float, float]]) -> None:
     manifest = Manifest.load(plan.series_dir)
     if manifest is None:
         return
@@ -563,6 +570,7 @@ def _record_in_manifest(plan: FilmPlan, result: FilmResult) -> None:
             "bytes": result.size,
             "mode": result.mode,
             "chapters": result.chapters,
+            "chapter_times": [[n, round(start, 3), round(end, 3)] for n, start, end in marks],
             "created_at": now_iso(),
         },
     )

@@ -19,3 +19,7 @@ sdg = "shortdramagen.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["shortdramagen*"]
+
+[tool.setuptools.package-data]
+# the web interface (sdg ui) is served from these files
+shortdramagen = ["web/*", "web/**/*"]

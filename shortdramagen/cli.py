@@ -81,7 +81,23 @@ def build_parser() -> argparse.ArgumentParser:
     film_options(p_film)
     ffmpeg_path(p_film)
     p_film.set_defaults(handler=cmd_film)
+
+    p_ui = sub.add_parser("ui", help="ouvre l'interface web locale : bibliothèque, lecture des épisodes et des films")
+    p_ui.add_argument(
+        "-o", "--out", type=Path,
+        help="dossier des téléchargements, mémorisé pour les fois suivantes (défaut : le dernier utilisé, sinon ./downloads)",
+    )  # fmt: skip
+    p_ui.add_argument("--port", type=port_number, help="port local (défaut : 8765, sinon le premier libre jusqu'à 8775)")
+    p_ui.add_argument("--no-browser", action="store_true", help="n'ouvre pas le navigateur")
+    p_ui.add_argument("--window", action="store_true", help="ouvre une fenêtre d'application (Edge ou Chrome) au lieu d'un onglet")
+    p_ui.set_defaults(handler=cmd_ui)
     return parser
+
+
+def port_number(text: str) -> int:
+    if not text.isdigit() or not 1 <= int(text) <= 65535:
+        raise argparse.ArgumentTypeError("port attendu : un nombre de 1 à 65535")
+    return int(text)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -221,3 +237,9 @@ def cmd_links(args, log) -> int:
         for link in links:
             print(link["url"])
     return 0 if len(links) == len(pipeline.select_episodes(series, opts.episodes, lambda _: None)) else 1
+
+
+def cmd_ui(args, log) -> int:
+    from .server.launch import run_ui  # the server is only loaded when needed
+
+    return run_ui(args.out, args.port, open_browser=not args.no_browser, window=args.window, log=log)

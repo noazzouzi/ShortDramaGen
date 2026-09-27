@@ -173,6 +173,7 @@ sdg fetch <url> [--lang fr] [-q best|1080p|720p|540p] [-e 1-10,28,40-] [-o downl
                 [--film [--reencode] [--allow-missing] [--no-chapters] [--replace] [--ffmpeg PATH]]
 sdg links <url> [--lang fr] [-q ...] [-e ...] [--json]   # URLs pour aria2c / IDM
 sdg film  <dossier|url|id> [--lang fr] [-f film.mp4] [--reencode] [--allow-missing] [--no-chapters] [--replace] [--ffmpeg PATH]
+sdg ui    [-o dossier] [--port 8765] [--no-browser] [--window]   # interface web locale (§3.11)
 ```
 
 La CLI n'est qu'un client du moteur : `info` appelle `preview_series`, `fetch`
@@ -355,6 +356,91 @@ décide de sonder. `Preview.to_dict()` donne la charge utile prévue par l'API
 (durée totale, épisodes gratuits, épisode visé par le lien, estimation de
 taille en 1080p, seule qualité mesurée).
 
+### 3.11 Interface locale : `sdg ui` (étape 1, lecture seule)
+
+Un serveur de la bibliothèque standard (`ThreadingHTTPServer`) sert l'API
+JSON, les vidéos et le client web. Contrat : [spec §11](frontend/spec-v1.md#11-contrat-dapi-v1).
+
+```mermaid
+flowchart LR
+  NAV["Navigateur<br/>web/ : JS natif, sans build"] -- "REST + jeton" --> API["server/api.py"]
+  NAV -- "video, img (Range)" --> MED["server/media.py"]
+  API --> LIB["library.py<br/>index + réconciliation"]
+  MED --> LIB
+  LIB --> DISK[("downloads/<br/>manifest.json, E###.mp4,<br/>cover.jpg, film")]
+  API --> SET["settings.py<br/>%LOCALAPPDATA%/ShortDramaGen"]
+```
+
+**`library.py`** : l'index de la bibliothèque.
+- Scan d'un seul niveau de `downloads/` : chaque dossier `<bookId>-<slug>[-<lang>]`
+  avec un `manifest.json` est une **version** ; les versions d'un même
+  `book_id` forment un **groupe** (VO d'abord). Les dossiers cachés (`.sdg`),
+  les liens symboliques et les noms inattendus sont ignorés ; un manifest
+  illisible est signalé dans `problems` au lieu de tout bloquer.
+- Cache par dossier : date et taille du manifest, date du dossier. Un scan
+  sans changement ne relit rien, et `version` n'augmente qu'en cas de
+  changement (ETag `"lib-<version>-<réglages>"`, réponse `304`).
+- **Réconciliation** manifest / disque, par épisode :
+
+  | Manifest | Fichier `E###.mp4` | `.part` | Statut exposé |
+  |---|---|---|---|
+  | `done` | présent | — | `done` (+ `suspect` si la taille a changé) ; `done_unverified` en mode sonde |
+  | `done` | absent | — | `missing` |
+  | autre | présent | — | `done_unverified` (le prochain `fetch` le vérifiera) |
+  | `failed` | absent | — | `unavailable` si `ep_unavailable`, sinon `failed` |
+  | `pending` / `downloading` | absent | présent | `partial` (avec `part_bytes`) |
+  | `pending` / `downloading` | absent | absent | `pending`, ou `not_requested` hors de `requested.episodes` |
+  | `removed` | absent | — | `removed` |
+
+  État d'une version : `interrupted` > `failed` > `incomplete` > `complete`.
+  État du film : `ready`, `partial` (il ne couvre qu'une partie),
+  `stale` (épisodes ajoutés ou modifiés depuis), `missing_file`, `outside`
+  (créé hors du dossier avec `-f` : jamais servi).
+- **Aucune URL signée** ne sort de l'index : les champs `url` du manifest ne
+  sont pas exposés, et les messages d'erreur sont nettoyés (`[lien masqué]`).
+- **Fichiers servis** : le chemin est toujours reconstruit par l'index
+  (`E{n:03d}.mp4`, `cover.jpg`, nom de film validé), puis résolu ; il doit
+  rester dans le dossier de la série et dans la bibliothèque. Un lien
+  symbolique qui en sort donne `403 outside_library`.
+- Chapitres du film (`chapters.vtt`) : lus dans `film.chapter_times` (nouveau
+  champ écrit par `film.py`), sinon recalculés comme à la création.
+
+**`server/`**
+- `security.py` : `Host` = `127.0.0.1:<port>` ou `localhost:<port>` (sinon
+  `421`, contre le rebinding DNS) ; `Sec-Fetch-Site` `cross-site` ou
+  `same-site` refusé (`403`, un autre port local compte comme « same-site ») ;
+  `/api/*` exige `X-SDG-Token` (HMAC d'un secret local, écrit dans
+  `index.html`) ; CSP stricte, `nosniff`, `Cross-Origin-Resource-Policy:
+  same-origin` ; écoute sur `127.0.0.1` uniquement, `SO_EXCLUSIVEADDRUSE`
+  sous Windows.
+- `media.py` : `Range` fait maison (`a-b`, `a-`, `-n`, `If-Range`, `416`,
+  `HEAD`), plage ouverte plafonnée à 8 Mio pour ne pas garder un fichier
+  ouvert (Windows ne supprime pas un fichier ouvert), `?download=1` avec un
+  nom UTF-8 (RFC 5987).
+- `api.py` : `GET /api/health`, `/api/library`, `/api/series/{key}`,
+  `/api/settings` ; `GET|HEAD /media/series/{key}/episodes/{n}`, `/film`,
+  `/film/chapters.vtt`, `/cover`.
+- `app.py` : fichiers statiques lus une fois au démarrage (aucun accès disque
+  par requête), 64 connexions au plus, journal dans `server.log`.
+- `launch.py` : **instance unique** (`server.json` + `/api/health` : un
+  second `sdg ui` ouvre simplement le navigateur), port 8765 puis 8766 à
+  8775, `--window` (Edge ou Chrome en mode application), arrêt propre sur
+  Ctrl+C ou SIGTERM.
+
+**`settings.py`** : état local dans `%LOCALAPPDATA%\ShortDramaGen`
+(`~/.config/shortdramagen` ailleurs, `SDG_HOME` pour les tests) :
+`settings.json` validé champ par champ (dossier absolu, inscriptible, ni
+racine de disque ni dossier système), `secret` réutilisé d'un lancement à
+l'autre, `server.json`, `server.log`. Le dossier des téléchargements est
+mémorisé : `-o` au premier lancement, sinon `./downloads` comme `sdg fetch`.
+
+**Client** (`web/`) : HTML, CSS et modules ES natifs, sans build. Le DOM est
+construit sans `innerHTML` (aucune donnée interprétée comme du HTML) ni
+attribut `style` (CSP) : seules des variables CSS sont posées. Routeur par
+hash (`#/`, `#/serie/<id>/<vo|fr…>`, `…/lire/<n|film>`), rafraîchissement
+toutes les 5 s avec ETag tant que la page est visible (le temps réel en SSE
+arrive à l'étape 2).
+
 ## 4. Séquence d'un `sdg fetch`
 
 ```mermaid
@@ -399,7 +485,7 @@ venait à protéger son API (voir [03](03-brainstorm-et-roadmap.md)).
 ```
 shortdramagen/
 ├── __main__.py      # python -m shortdramagen
-├── cli.py           # sous-commandes info / fetch / links / film
+├── cli.py           # sous-commandes info / fetch / links / film / ui
 ├── models.py        # BookRef, Series, Episode, VideoSource
 ├── inputs.py        # URL -> BookRef, plages d'épisodes
 ├── errors.py        # codes d'erreur stables
@@ -411,7 +497,11 @@ shortdramagen/
 ├── mp4.py           # durée, codecs, edit lists d'un MP4 (sans ffmpeg)
 ├── film.py          # fusion en un seul film (ffmpeg) + chapitres
 ├── manifest.py      # état par série
-└── pipeline.py      # orchestration, FetchControl, aperçu
+├── pipeline.py      # orchestration, FetchControl, aperçu
+├── library.py       # index de la bibliothèque (sdg ui)
+├── settings.py      # réglages, secret, instance du serveur
+├── server/          # sdg ui : app, api, media (Range), security, launch
+└── web/             # client : index.html, app.css, js/ (vues bibliothèque, fiche, théâtre)
 tests/
 ├── fakes.py         # FakeHttp, générateur de MP4 (pistes, avcC, esds, edit lists)
 ├── fixtures/        # extraits réels anonymisés (site officiel EN/FR, réponse get_video)

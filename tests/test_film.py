@@ -302,6 +302,8 @@ class RealFfmpegTest(TempDirTest):
         self.assertTrue(seen)
         manifest = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["film"]["episodes"], [1, 2, 3])
+        marks = film.chapter_marks(plan)  # stored for the interface's chapters.vtt
+        self.assertEqual(manifest["film"]["chapter_times"], [[n, round(a, 3), round(b, 3)] for n, a, b in marks])
         self.assertEqual(list(d.glob("*.part")), [])
 
     def test_mixed_sizes_need_reencode(self):

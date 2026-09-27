@@ -81,6 +81,31 @@ python -m shortdramagen film "downloads/41000105199-one-night-to-forever" -f "C:
   épisodes, aucun modifié depuis), il est simplement réutilisé ; sinon l'outil
   refuse. `--replace` le reconstruit, `-f` choisit un autre nom.
 
+### Interface web : parcourir et regarder
+
+```bash
+python -m shortdramagen ui                       # ouvre http://127.0.0.1:8765/ dans le navigateur
+python -m shortdramagen ui -o "D:/Séries"        # autre dossier (mémorisé pour la suite)
+python -m shortdramagen ui --window              # fenêtre d'application Edge/Chrome, sans barre d'adresse
+```
+
+- **Bibliothèque** : un mur d'affiches, avec l'état de chaque série
+  (complète, à compléter, avec échecs, interrompue, film prêt), une recherche
+  et des filtres. Les versions d'une même série (VO, VF…) sont regroupées.
+- **Fiche série** : tous les épisodes en grille, avec le détail de chaque
+  problème (échec, indisponible, fichier supprimé, 720p isolé…), le film, la
+  place occupée et la commande à lancer pour réparer.
+- **Lecture** dans le navigateur, épisode par épisode (enchaînement
+  automatique) ou le film avec ses chapitres.
+- Tout reste **local** : le serveur n'écoute que sur `127.0.0.1` et refuse
+  les requêtes des autres sites. Les liens signés de la source ne sont
+  jamais affichés.
+
+Pour l'instant, l'interface sert à **parcourir et regarder**. Les
+téléchargements et la création de films se lancent encore avec `fetch` et
+`film` ; ce qui est téléchargé apparaît tout seul dans l'interface, sans
+recharger la page.
+
 **Entrées acceptées** : URL `dramaboxdb.com` (série ou épisode, avec ou sans
 `/fr/`), `dramabox.com/drama/…`, lien de partage de l'app, URL dramafren
 (`detail` ou `watch`), ou l'identifiant seul (`41000105199`).
@@ -98,7 +123,7 @@ repartent de leur `.part`.
 ```text
 downloads/41000105199-one-night-to-forever-fr/
 ├── E001.mp4 … E062.mp4
-├── cover.jpg          # affiche de la série
+├── cover.jpg          # affiche de la série (pour l'interface)
 ├── Qui Est la Véritable Mme Lafont.mp4   # avec --film ou « sdg film »
 └── manifest.json      # titre, épisodes, statut, qualité, URL et expiration, taille, code d'erreur, film
 ```
@@ -126,12 +151,12 @@ downloads/41000105199-one-night-to-forever-fr/
 | [01 — Étude technique](docs/01-etude-technique.md) | Constats vérifiés : API dramafren, CDN, site officiel, formats d'URL, cadre légal |
 | [02 — Architecture](docs/02-architecture.md) | Composants, flux, manifest, moteur pilotable (événements, codes d'erreur), choix techniques |
 | [03 — Brainstorm & roadmap](docs/03-brainstorm-et-roadmap.md) | Approches comparées, risques, plans B, suite |
-| [04 — Frontend](docs/04-frontend.md) | Plan de l'interface web : recherche, 3 concepts et jury, spec, système visuel, API, maquette haute fidélité |
+| [04 — Frontend](docs/04-frontend.md) | Interface web : recherche, 3 concepts et jury, spec, système visuel, API, maquette, avancement (étapes 0 et 1 livrées) |
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests      # 70 tests, hors ligne, environ 1 s
+python -m unittest discover -s tests      # 106 tests, hors ligne, environ 2 s
 # (4 tests de fusion utilisent un vrai ffmpeg ; ils sont ignorés s'il est absent)
 ```
 
