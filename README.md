@@ -119,6 +119,7 @@ downloads/41000105199-one-night-to-forever-fr/
 | [01 — Étude technique](docs/01-etude-technique.md) | Constats vérifiés : API dramafren, CDN, site officiel, formats d'URL, cadre légal |
 | [02 — Architecture](docs/02-architecture.md) | Composants, flux, manifest, choix techniques |
 | [03 — Brainstorm & roadmap](docs/03-brainstorm-et-roadmap.md) | Approches comparées, risques, plans B, suite |
+| [04 — Frontend](docs/04-frontend.md) | Plan de l'interface web : recherche, 3 concepts et jury, spec, système visuel, API, maquette haute fidélité |
 
 ## Tests
 
