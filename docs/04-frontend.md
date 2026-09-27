@@ -22,7 +22,7 @@ Le travail s'est fait en plusieurs passes indépendantes, avec une confrontation
 | Concepts | 3 directeurs UX, chacun avec un angle imposé | [A « Bibliothèque d'abord »](frontend/brainstorm/5-concept-A.md) · [B « Flux d'abord »](frontend/brainstorm/5-concept-B.md) · [C « Poste de pilotage »](frontend/brainstorm/5-concept-C.md) |
 | Jury | 3 juges indépendants (heuristiques · efficacité · visuel, accessibilité et faisabilité) | [Notes et verdicts](frontend/brainstorm/6-jury.md) |
 | Synthèse | Lead designer | [Spec v1](frontend/spec-v1.md) + [système visuel](frontend/design-system.md) + plan des écrans |
-| Maquette | 10 écrans construits, validés automatiquement (format), puis revus sous 5 angles et corrigés | Canevas publié |
+| Maquette | 10 écrans construits (l'accueil d'abord, comme référence commune), un validateur de format, puis une revue contradictoire écran par écran sous 5 angles (fidélité, UX, accessibilité, cohérence, runtime) | 173 remarques (2 bloquantes, 47 majeures, 124 mineures) : 165 appliquées, 22 rejetées avec justification. Les 10 écrans passent le validateur. Canevas publié. |
 
 ## 3. Décision : « Bibliothèque d'abord », en version hybride
 
