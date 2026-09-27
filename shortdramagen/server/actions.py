@@ -17,10 +17,12 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .. import desktop, dramafren, errors, film, inputs, official, pipeline
+from .. import desktop, errors, film, inputs, pipeline
+from ..download import download_cover
 from ..events import Event
 from ..http import TRANSIENT_ERRORS, HttpStatusError
 from ..library import IGNORABLE, LibraryError
+from ..providers import registry
 from ..settings import LANG_RE, QUALITIES, validate
 from .replies import ApiError, Reply, StreamReply, json_reply
 
@@ -238,10 +240,10 @@ def create_job(app: "App", req: "Request"):
         "film_after": flag(data, "film_after", app.settings["film_after_download"]),
         "record_request": True,
     }
-    cached = app.preview_cache.get((ref.book_id, lang or "vo"))
+    cached = app.preview_cache.get((ref.key, lang or "vo"))
     title = cached[1].get("title") if cached else None
     cover = cached[1].get("cover_url") if cached else None
-    return created(app, app.runner.create_fetch(ref.book_id, lang, params, title=title, cover_url=cover))
+    return created(app, app.runner.create_fetch(ref.book_id, lang, params, title=title, cover_url=cover, provider=ref.provider))
 
 
 # --- repairs ---------------------------------------------------------------------------------
@@ -258,7 +260,7 @@ def _fetch_for_version(app: "App", key: str, numbers: list[int] | None, *, quali
     detail = app.library.series(key)
     requested = detail.get("requested") or {}
     params = {
-        "input": detail["book_id"],
+        "input": registry.get(detail["provider"]).series_link(detail["book_id"], detail.get("slug")),
         "quality": quality or requested.get("quality") or "best",
         "episodes": None if complete else compress(numbers),
         "force": sorted(force),
@@ -268,7 +270,7 @@ def _fetch_for_version(app: "App", key: str, numbers: list[int] | None, *, quali
         "record_request": complete,
     }
     return app.runner.create_fetch(detail["book_id"], version_lang(detail), params, series_key=key,
-                                   title=detail["title"], cover_url=detail["cover_url"])  # fmt: skip
+                                   title=detail["title"], cover_url=detail["cover_url"], provider=detail["provider"])  # fmt: skip
 
 
 def retry(app: "App", req: "Request", key: str):
@@ -394,7 +396,7 @@ def film_job(app: "App", key: str, data: dict):
     except film.FilmError as e:
         raise ApiError(_FILM_STATUS.get(e.code, 422), e.code, str(e)) from None
     job = app.runner.create_film(key, summary["book_id"], version_lang(summary), params,
-                                 title=summary["title"], cover_url=summary["cover_url"])  # fmt: skip
+                                 title=summary["title"], cover_url=summary["cover_url"], provider=summary["provider"])  # fmt: skip
     return created(app, job)
 
 
@@ -491,7 +493,7 @@ def preview(app: "App", req: "Request"):
         raise ApiError(422, "invalid_input", str(e).split("\n")[0], {"field": "input"}) from None
     requested = lang_value(data.get("lang"))
     lang = requested or ref.lang
-    key = (ref.book_id, lang or "vo")
+    key = (ref.key, lang or "vo")
     cached = app.preview_cache.get(key)
     if cached and time.monotonic() - cached[0] < PREVIEW_TTL:
         result = dict(cached[1])
@@ -506,12 +508,15 @@ def _fetch_preview(app: "App", ref, lang: str | None, lang_source: str) -> dict:
     seen = []
     control = pipeline.FetchControl(limiter=app.runner.limiter, on_event=lambda name, d: seen.append((name, d)))
     warnings = []
+    provider = registry.get(ref.provider)
     try:
         found = pipeline.preview_series(app.http, ref, lang, control)
-    except official.SeriesNotFound:
+    except errors.SeriesNotFound:
+        if not provider.can_probe:
+            raise ApiError(404, "series_not_found", f"Série introuvable sur {provider.label}. Vérifie le lien.") from None
         return _probe_preview(app, ref)
     except (HttpStatusError, *TRANSIENT_ERRORS):
-        raise ApiError(502, "network", "Impossible de joindre DramaBox. Vérifie ta connexion.") from None
+        raise ApiError(502, "network", f"Impossible de joindre {provider.label}. Vérifie ta connexion.") from None
     result = found.to_dict()
     for name, d in seen:
         if name == "lang_fallback":
@@ -520,8 +525,8 @@ def _fetch_preview(app: "App", ref, lang: str | None, lang_source: str) -> dict:
                              "message": f"Langue « {d['requested']} » indisponible pour cette série : version originale utilisée."})  # fmt: skip
     slug = "vo" if result["is_original"] else result["lang"]
     if found.series.cover and found.series.cover.startswith("https://"):
-        app.preview_covers[(ref.book_id, slug)] = found.series.cover
-        result["cover_url"] = f"/media/preview/{ref.book_id}/{slug}/cover"
+        app.preview_covers[(ref.key, slug)] = found.series.cover
+        result["cover_url"] = f"/media/preview/{ref.key}/{slug}/cover"
     else:
         result["cover_url"] = None
     result.update(lang_source=lang_source, warnings=warnings)
@@ -530,14 +535,16 @@ def _fetch_preview(app: "App", ref, lang: str | None, lang_source: str) -> dict:
 
 def _probe_preview(app: "App", ref) -> dict:
     """A series missing from the official site: usable if the source knows episode 1."""
+    provider = registry.get(ref.provider)
     try:
-        sources = dramafren.get_video(app.http, ref.book_id, 1)
-    except dramafren.ResolveError:
+        sources = provider.probe_first(app.http, ref)
+    except errors.ResolveError:
         raise ApiError(404, "series_not_found", "On n'a trouvé cette série ni sur le site officiel ni à la source. "
                        "Vérifie le lien ou essaie avec le n° de série (11 chiffres).") from None  # fmt: skip
     except (HttpStatusError, *TRANSIENT_ERRORS):
-        raise ApiError(502, "network", "Impossible de joindre DramaBox. Vérifie ta connexion.") from None
+        raise ApiError(502, "network", f"Impossible de joindre {provider.label}. Vérifie ta connexion.") from None
     return {
+        "provider": provider.name, "provider_label": provider.label, "ref": ref.key, "free_only": False,
         "book_id": ref.book_id, "source_book_id": ref.book_id, "lang": None, "is_original": True, "lang_source": "default",
         "title": f"Série {ref.book_id}", "title_vo": None, "introduction": None, "cover_url": None,
         "from_official": False, "episode_count": None, "duration_s": None, "episode_duration_s": None,
@@ -554,7 +561,7 @@ def _with_local_state(app: "App", result: dict) -> dict:
     app.library.refresh()
     local = []
     for group in app.library.library()["groups"]:
-        if group["book_id"] != result["book_id"]:
+        if group["ref"] != result["ref"]:
             continue
         for v in group["versions"]:
             local.append({
@@ -567,20 +574,20 @@ def _with_local_state(app: "App", result: dict) -> dict:
     except OSError:
         free = None
     need = max((e.get("bytes") or 0 for e in (result.get("estimate") or {}).values()), default=0)
-    job = app.runner.open_job_for(result["book_id"], None if result["is_original"] else result["lang"])
+    job = app.runner.open_job_for(result["book_id"], None if result["is_original"] else result["lang"], result["provider"])
     return {**result, "local": local, "queued_job_id": job.id if job else None,
             "disk": {"free_bytes": free, "enough": free is None or free > need * 1.1}}  # fmt: skip
 
 
-def preview_cover(app: "App", book_id: str, lang: str) -> Path:
-    url = app.preview_covers.get((book_id, lang))
+def preview_cover(app: "App", ref: str, lang: str) -> Path:
+    url = app.preview_covers.get((ref, lang))
     if not url:
         raise LibraryError("Aperçu inconnu : relance l'aperçu de cette série.")
-    path = app.state / "cache" / "covers" / f"{book_id}-{lang}.jpg"
+    path = app.state / "cache" / "covers" / f"{ref.replace(':', '-')}-{lang}.jpg"
     if not path.is_file():
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            official.download_cover(app.http, url, path)
+            download_cover(app.http, url, path)
         except (HttpStatusError, ValueError, *TRANSIENT_ERRORS):
             raise ApiError(502, "network", "Affiche indisponible pour le moment.") from None
     return path

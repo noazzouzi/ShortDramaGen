@@ -29,13 +29,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import errors, film, fsutil, official, pipeline
+from . import errors, film, fsutil, inputs, pipeline
 from .connectivity import Connectivity
 from .events import EventBus
 from .http import TRANSIENT_ERRORS, HttpStatusError
 from .library import clean_text
 from .manifest import Manifest, ManifestError, now_iso
-from .models import BookRef
+from .models import DEFAULT_PROVIDER, BookRef, ref_key
 
 log = logging.getLogger("shortdramagen.jobs")
 
@@ -225,6 +225,7 @@ class Job:
     series_key: str | None = None
     book_id: str | None = None
     lang: str | None = None  # None: original version
+    provider: str = DEFAULT_PROVIDER
     title: str | None = None
     cover_url: str | None = None
     created_at: str = field(default_factory=now_iso)
@@ -245,13 +246,27 @@ class Job:
     fallbacks: dict = field(default_factory=dict)
 
     PERSISTED = (
-        "id", "kind", "params", "status", "phase", "series_key", "book_id", "lang", "title", "cover_url",
+        "id", "kind", "params", "status", "phase", "series_key", "book_id", "lang", "provider", "title", "cover_url",
         "created_at", "started_at", "finished_at", "result", "error", "reason", "then", "parent", "selected", "log",
     )  # fmt: skip
 
     @property
     def lang_key(self) -> str:
         return self.lang or "vo"
+
+    @property
+    def ref(self) -> str | None:
+        return ref_key(self.provider, self.book_id) if self.book_id else None
+
+    def book_ref(self) -> BookRef:
+        """The series to fetch; the typed link is read again for what the id alone lacks (a slug)."""
+        try:
+            ref = inputs.parse_input(str(self.params.get("input") or ""))
+        except inputs.InputError:
+            ref = None
+        if ref and ref.provider == self.provider and ref.book_id == self.book_id:
+            return BookRef(self.book_id, provider=self.provider, slug=ref.slug)
+        return BookRef(self.book_id, provider=self.provider)
 
     def persist(self) -> dict:
         data = {name: getattr(self, name) for name in self.PERSISTED}
@@ -271,6 +286,7 @@ class Job:
 
     def to_dict(self, position: int | None = None, with_log: bool = False) -> dict:
         data = {name: getattr(self, name) for name in self.PERSISTED if name != "log"}
+        data["ref"] = self.ref
         data["position"] = position
         data["progress"] = self.progress.last if self.progress is not None and self.status in RUNNING else None
         if with_log:
@@ -463,11 +479,12 @@ class JobRunner:
                 (j for j in self.store.jobs.values() if j.status in OPEN and j.series_key == series_key), None
             )
 
-    def open_job_for(self, book_id: str, lang: str | None) -> Job | None:
+    def open_job_for(self, book_id: str, lang: str | None, provider: str = DEFAULT_PROVIDER) -> Job | None:
         with self._lock:
             return next(
                 (j for j in self.store.jobs.values()
-                 if j.kind == "fetch" and j.status in OPEN and j.book_id == book_id and j.lang_key == (lang or "vo")),
+                 if j.kind == "fetch" and j.status in OPEN and j.provider == provider and j.book_id == book_id
+                 and j.lang_key == (lang or "vo")),
                 None,
             )  # fmt: skip
 
@@ -496,18 +513,20 @@ class JobRunner:
         title: str | None = None,
         cover_url: str | None = None,
         parent: str | None = None,
+        provider: str = DEFAULT_PROVIDER,
     ) -> Job:
         with self._cond:
-            duplicate = self.open_job_for(book_id, lang) or (self.busy(series_key) if series_key else None)
+            duplicate = self.open_job_for(book_id, lang, provider) or (self.busy(series_key) if series_key else None)
             if duplicate:
                 raise JobError(409, "duplicate_job", "Cette série est déjà dans la file.", {"job_id": duplicate.id})
-            job = Job(new_id(), "fetch", params, book_id=book_id, lang=lang, series_key=series_key,
+            job = Job(new_id(), "fetch", params, book_id=book_id, lang=lang, provider=provider, series_key=series_key,
                       title=title, cover_url=cover_url, parent=parent)  # fmt: skip
             self._add(job)
             return job
 
     def create_film(self, series_key: str, book_id: str, lang: str | None, params: dict,
-                    title: str | None = None, cover_url: str | None = None, parent: str | None = None) -> Job:  # fmt: skip
+                    title: str | None = None, cover_url: str | None = None, parent: str | None = None,
+                    provider: str = DEFAULT_PROVIDER) -> Job:  # fmt: skip
         with self._cond:
             duplicate = next(
                 (j for j in self.store.jobs.values() if j.kind == "film" and j.status in OPEN and j.series_key == series_key),
@@ -515,7 +534,7 @@ class JobRunner:
             )
             if duplicate:
                 raise JobError(409, "duplicate_job", "Un film de cette série est déjà en préparation.", {"job_id": duplicate.id})
-            job = Job(new_id(), "film", params, book_id=book_id, lang=lang, series_key=series_key,
+            job = Job(new_id(), "film", params, book_id=book_id, lang=lang, provider=provider, series_key=series_key,
                       title=title, cover_url=cover_url, parent=parent)  # fmt: skip
             self._add(job)
             return job
@@ -672,7 +691,7 @@ class JobRunner:
     def _conflict(a: Job, b: Job) -> bool:
         if a.series_key and b.series_key:
             return a.series_key == b.series_key
-        return a.book_id == b.book_id and a.lang_key == b.lang_key
+        return a.provider == b.provider and a.book_id == b.book_id and a.lang_key == b.lang_key
 
     def _launch(self, job: Job) -> None:
         job.stop = threading.Event()
@@ -738,6 +757,7 @@ class JobRunner:
             quality=p.get("quality") or "best",
             jobs=self.settings["parallel_downloads"],
             episodes=[tuple(r) for r in p["episodes"]] if p.get("episodes") else None,
+            ffmpeg_path=self.settings["ffmpeg_path"],
         )
         control = pipeline.FetchControl(
             stop=job.stop,
@@ -749,11 +769,11 @@ class JobRunner:
             record_request=p.get("record_request", True),
         )
         try:
-            result = pipeline.fetch(self.http, BookRef(job.book_id), opts, log=lambda m: self._log(job, m), control=control)
+            result = pipeline.fetch(self.http, job.book_ref(), opts, log=lambda m: self._log(job, m), control=control)
         except pipeline.Cancelled:
             self._stopped(job)
             return
-        except official.SeriesNotFound as e:
+        except errors.SeriesNotFound as e:
             with self._lock:
                 self._finish(job, "failed", error={"code": "series_not_found", "message": str(e)})
             return
@@ -802,7 +822,7 @@ class JobRunner:
             film_job = self.create_film(
                 job.series_key, job.book_id, job.lang,
                 {"reencode": False, "allow_missing": False, "chapters": True, "output_name": None, "replace": "auto"},
-                title=job.title, cover_url=job.cover_url, parent=job.id,
+                title=job.title, cover_url=job.cover_url, parent=job.id, provider=job.provider,
             )  # fmt: skip
         except JobError as e:
             self._log(job, f"Film non lancé : {e}", "warn", e.code)

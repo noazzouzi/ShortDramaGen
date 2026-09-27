@@ -34,6 +34,7 @@ def download(
     dest: Path,
     expected_duration_ms: int | None = None,
     on_progress: Callable[[int, int], None] | None = None,
+    tolerance_s: float = DURATION_TOLERANCE_S,
 ) -> int:
     """Download ``url`` to ``dest`` and return its size in bytes.
 
@@ -59,7 +60,7 @@ def download(
         if e.status == 416 and offset:
             # Stale .part (e.g. the file changed on the CDN): start over.
             part.unlink()
-            return download(http, url, dest, expected_duration_ms, on_progress)
+            return download(http, url, dest, expected_duration_ms, on_progress, tolerance_s)
         if e.status in (401, 403, 404, 410):
             raise UrlRejected(str(e)) from None
         raise
@@ -67,7 +68,13 @@ def download(
     size = part.stat().st_size
     if total and size != total:
         raise IntegrityError(f"téléchargement incomplet : {size} octets reçus sur {total}")
-    check_duration(part, expected_duration_ms)
+    check_duration(part, expected_duration_ms, tolerance_s)
+    return finish(part, dest)
+
+
+def finish(part: Path, dest: Path) -> int:
+    """Put a verified .part in place and drop the leftovers of other attempts; returns the size."""
+    size = part.stat().st_size
     fsutil.replace(part, dest)  # the antivirus may still be scanning the .part
     for stale in dest.parent.glob(f"{dest.stem}.*.part"):  # other qualities tried before
         stale.unlink(missing_ok=True)
@@ -81,7 +88,7 @@ def part_path(dest: Path, url: str) -> Path:
     return dest.with_name(f"{dest.stem}.{name}.part")
 
 
-def check_duration(path: Path, expected_duration_ms: int | None) -> None:
+def check_duration(path: Path, expected_duration_ms: int | None, tolerance_s: float = DURATION_TOLERANCE_S) -> None:
     try:
         seconds = mp4.duration_seconds(path)
     except (OSError, IndexError, struct.error) as e:  # truncated or corrupt file
@@ -90,12 +97,26 @@ def check_duration(path: Path, expected_duration_ms: int | None) -> None:
     if seconds is None:
         path.unlink(missing_ok=True)
         raise IntegrityError("MP4 illisible (pas de boîte moov/mvhd)", errors.MP4_UNREADABLE)
-    if expected_duration_ms and abs(seconds - expected_duration_ms / 1000) > DURATION_TOLERANCE_S:
+    if expected_duration_ms and abs(seconds - expected_duration_ms / 1000) > tolerance_s:
         path.unlink(missing_ok=True)
         raise IntegrityError(
             f"durée {seconds:.1f} s au lieu de {expected_duration_ms / 1000:.1f} s (mauvais fichier ?)",
             errors.DURATION_MISMATCH,
         )
+
+
+_IMAGE_MAGIC = (b"\xff\xd8", b"\x89PNG", b"RIFF")  # JPEG, PNG, WebP
+
+
+def download_cover(http: Http, url: str, dest: Path) -> int:
+    """Save a series cover next to the episodes; returns its size."""
+    resp = http.get(url)
+    if not resp.body.startswith(_IMAGE_MAGIC):
+        raise ValueError("la cover reçue n'est pas une image")
+    tmp = dest.with_name(dest.name + ".part")
+    tmp.write_bytes(resp.body)
+    fsutil.replace(tmp, dest)
+    return len(resp.body)
 
 
 def _total_size(status: int, headers, offset: int) -> int:

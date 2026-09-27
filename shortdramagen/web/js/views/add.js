@@ -3,7 +3,7 @@
 
 import { ApiError, post } from "../api.js";
 import { announce, append, clear, codeBox, h, icon } from "../dom.js";
-import { ACCEPTED, detect } from "../detect.js";
+import { ACCEPTED, detect, linkLabel } from "../detect.js";
 import { bytes, capitalize, duration, htmlLang, langName, plural, ranges } from "../format.js";
 import { openDialog } from "../ui.js";
 
@@ -60,7 +60,7 @@ export function openAddDialog(ctx, { input = "", lang = null } = {}) {
 
   const field = h("input", {
     class: "mono", type: "text", value: st.input, autocomplete: "off", spellcheck: "false",
-    placeholder: "Colle le lien d'une série DramaBox ou son numéro", "aria-label": "Lien de la série",
+    placeholder: "Colle le lien d'une série ou son numéro", "aria-label": "Lien de la série",
     "aria-describedby": "ajout-aide", "data-autofocus": !st.input || null,
   });
   const chip = h("span", { class: "detect-chip", hidden: true });
@@ -83,7 +83,7 @@ export function openAddDialog(ctx, { input = "", lang = null } = {}) {
     const d = st.detected;
     chip.hidden = !(d.kind === "id" || d.kind === "link" || d.kind === "batch");
     if (d.kind === "batch") chip.textContent = `${d.links.filter((l) => l.kind === "id" || l.kind === "link").length} liens reconnus sur ${d.links.length}`;
-    else if (!chip.hidden) chip.textContent = `Lien DramaBox · série ${d.bookId}${d.lang ? ` · ${d.lang.toUpperCase()}` : ""}`;
+    else if (!chip.hidden) chip.textContent = linkLabel(d);
     const bad = d.kind === "invalid" || (d.kind === "text" && st.input.length > 0);
     fieldBox.querySelector(".field").classList.toggle("is-error", bad);
     help.textContent = bad ? `Ce lien n'est pas reconnu. ${ACCEPTED}` : "";
@@ -242,12 +242,12 @@ export function openAddDialog(ctx, { input = "", lang = null } = {}) {
     );
     const modeRadio = (value, label) =>
       h("label", { class: "radio-inline" }, h("input", { type: "radio", name: "ajout-episodes", value, checked: st.mode === value, onchange: () => { st.mode = value; update(); } }), label);
-    const command = ["python -m shortdramagen fetch", p.book_id, p.is_original ? "" : `--lang ${p.lang}`, st.quality !== "best" ? `-q ${st.quality}` : "",
+    const command = ["python -m shortdramagen fetch", p.ref, p.is_original ? "" : `--lang ${p.lang}`, st.quality !== "best" ? `-q ${st.quality}` : "",
       st.mode === "choose" && st.chosen.size ? `-e ${ranges([...st.chosen]).replace(/ /g, "")}` : "", st.filmAfter ? "--film" : ""].filter(Boolean).join(" ");
     return h(
       "div",
       { class: "add-options" },
-      h("label", { class: "form-row" }, h("span", { text: "Qualité" }), h("span", { class: "select" }, qualitySelect)),
+      p.free_only ? null : h("label", { class: "form-row" }, h("span", { text: "Qualité" }), h("span", { class: "select" }, qualitySelect)),
       h("div", { class: "form-row" }, h("span", { text: "Épisodes" }), h("div", { class: "radio-row-inline" }, modeRadio("all", "Tous"), modeRadio("choose", "Choisir…"))),
       st.mode === "choose" ? h("div", { class: "picker" }, episodePicker(p.episode_count || 0)) : null,
       h("p", { class: "note" }, "Dossier : ", h("span", { class: "mono", text: ctx.state.health?.downloads_dir || "" }), " (modifiable dans les Réglages)"),
@@ -277,7 +277,10 @@ export function openAddDialog(ctx, { input = "", lang = null } = {}) {
           "p",
           { class: `source-pill ${available ? "is-ok" : "is-danger"}` },
           icon(available ? "check" : "alert", { size: 14 }),
-          available ? `Source disponible · ${(p.availability.qualities || []).join(", ")}` : "La source ne répond pas pour cette série : le téléchargement risque d'échouer.",
+          !available
+            ? p.free_only ? `Aucun épisode gratuit sur le site ${p.provider_label}.` : "La source ne répond pas pour cette série : le téléchargement risque d'échouer."
+            : p.free_only ? `Site officiel ${p.provider_label} · ${plural((p.free_episodes || []).length, "épisode gratuit", "épisodes gratuits")}`
+            : `Source disponible · ${(p.availability.qualities || []).join(", ")}`,
         ),
       ),
     );
@@ -306,6 +309,10 @@ export function openAddDialog(ctx, { input = "", lang = null } = {}) {
         p.from_official === false
           ? h("div", { class: "notice is-info" }, icon("info", { size: 20 }), h("p", {}, h("strong", { text: "Infos limitées. " }), "Cette série n'est pas sur le site officiel : titre, durées et affiche indisponibles. Les épisodes seront détectés pendant le téléchargement, sans contrôle de durée."))
           : null,
+        p.free_only
+          ? h("div", { class: "notice is-info" }, icon("info", { size: 20 }), h("p", {}, h("strong", { text: `${p.provider_label} : épisodes gratuits seulement. ` }),
+              `Seuls les épisodes gratuits du site officiel sont téléchargés (${(p.free_episodes || []).length} sur ${p.episode_count || "?"}) ; les autres restent dans l'application ${p.provider_label}.`))
+          : null,
         p.episode_ref && !mine
           ? h("div", { class: "notice is-info" }, icon("info", { size: 20 }), h("p", {}, `C'est le lien de l'épisode ${p.episode_ref} : on te propose toute la série. `,
               h("button", { class: "link-btn", type: "button", onclick: () => { st.mode = "choose"; st.chosen = new Set([p.episode_ref]); st.rangeText = String(p.episode_ref); st.expanded = true; update(); }, text: `Seulement l'épisode ${p.episode_ref}` })))
@@ -325,7 +332,7 @@ export function openAddDialog(ctx, { input = "", lang = null } = {}) {
   }
 
   function summaryLine(p) {
-    const qualityLabel = st.quality === "best" ? `Meilleure (${p.availability?.qualities?.[0] || "1080p"})` : st.quality;
+    const qualityLabel = p.free_only ? "Qualité du site" : st.quality === "best" ? `Meilleure (${p.availability?.qualities?.[0] || "1080p"})` : st.quality;
     const episodes = st.mode === "choose" ? plural(st.chosen.size, "épisode choisi", "épisodes choisis") : "tous les épisodes";
     return h(
       "button",
@@ -482,7 +489,7 @@ export function openAddDialog(ctx, { input = "", lang = null } = {}) {
         const valid = row.kind === "id" || row.kind === "link";
         const p = row.preview;
         let detail;
-        if (!valid) detail = `La ligne ${row.index} n'est pas un lien DramaBox.`;
+        if (!valid) detail = `La ligne ${row.index} n'est pas un lien de série reconnu.`;
         else if (row.loading) detail = "Recherche de la série…";
         else if (row.error) detail = row.error;
         else {

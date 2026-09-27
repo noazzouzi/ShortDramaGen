@@ -1,4 +1,4 @@
-"""Is the network there? Measured, not guessed: the official site and the source are contacted.
+"""Is the network there? Measured, not guessed: the platforms' sites and sources are contacted.
 
 A download that fails because the network is down must not count as a
 failure: the job waits and starts again by itself when the connection is
@@ -14,12 +14,11 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from .http import USER_AGENT
+from .providers import registry
 
-OFFICIAL_URL = "https://www.dramaboxdb.com/"
-SOURCE_URL = "https://cdn-dramabox.dramafren.org/index.php"
 TIMEOUT = 6.0
 
-Probe = Callable[[], tuple[bool, bool]]  # (official site reachable, source reachable)
+Probe = Callable[[], tuple[bool, bool]]  # (an official site reachable, a source reachable)
 
 
 def reachable(url: str, timeout: float = TIMEOUT) -> bool:
@@ -35,7 +34,10 @@ def reachable(url: str, timeout: float = TIMEOUT) -> bool:
 
 
 def default_probe() -> tuple[bool, bool]:
-    return reachable(OFFICIAL_URL), reachable(SOURCE_URL)
+    """One answer is enough: the first reachable site ends each check."""
+    official = any(reachable(p.home_url) for p in registry.PROVIDERS)
+    source = any(reachable(url) for p in registry.PROVIDERS for url in p.source_urls)
+    return official, source
 
 
 class Connectivity:

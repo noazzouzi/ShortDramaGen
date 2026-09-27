@@ -3,23 +3,13 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 from .models import BookRef
+from .providers import registry
 
-_BOOK_ID = r"\d{8,14}"
-_RAW_ID_RE = re.compile(rf"^\s*({_BOOK_ID})\s*$")
-# dramaboxdb.com/{locale?}/movie/{id}/..., /ep/{id}_{slug}/..., dramabox(app).com/drama/{id}/...
-_PATH_RE = re.compile(
-    rf"^/(?:(?P<locale>[a-zA-Z]{{2}}(?:-[a-zA-Z]{{2,4}})?)/)?"
-    rf"(?:movie|drama|video|book)/(?P<id>{_BOOK_ID})(?:[/_?#]|$)"
-)
-_EP_PATH_RE = re.compile(
-    rf"^/(?:(?P<locale>[a-zA-Z]{{2}}(?:-[a-zA-Z]{{2,4}})?)/)?ep/(?P<id>{_BOOK_ID})_"
-)
-_EP_NUMBER_RE = re.compile(r"_Episode-(\d+)", re.IGNORECASE)
-_QUERY_KEYS = ("bookId", "book_id", "bid", "id")
-_ANY_ID_RE = re.compile(rf"(?<!\d)(4[12]\d{{9}})(?!\d)")
+_RAW_ID_RE = re.compile(r"^\s*(\d{8,14})\s*$")
+_PREFIXED_RE = re.compile(r"^\s*([a-z][a-z0-9]*):(\S+)\s*$")
 
 
 EpisodeRanges = list[tuple[int, int | None]]  # [(1, 10), (28, 28), (50, None)]; None = open end
@@ -55,44 +45,32 @@ def parse_episodes(spec: str | None) -> EpisodeRanges | None:
 
 
 def parse_input(text: str) -> BookRef:
-    """Accepts official URLs, share links, dramafren URLs or a bare book id.
-
-    Only official-site URLs carry a meaningful language: on dramafren the
-    ``lang`` parameter does not change the video, so it is ignored.
-    """
+    """Accepts a link of a known platform, a bare DramaBox id, or "platform:id" (goodshort:31000662271)."""
     m = _RAW_ID_RE.match(text)
     if m:
         return BookRef(m.group(1))
+    m = _PREFIXED_RE.match(text)
+    if m and m.group(1) in registry.names():
+        provider = registry.get(m.group(1))
+        if not re.fullmatch(provider.id_pattern, m.group(2)):
+            raise InputError(f"Identifiant {provider.label} invalide : {m.group(2)!r}")
+        return BookRef(m.group(2), provider=provider.name)
 
     url = text.strip()
     if "://" not in url:
         url = "https://" + url
     parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    if not host:
+    if not parsed.hostname:
         raise InputError(f"URL non reconnue : {text!r}")
-
-    for regex in (_EP_PATH_RE, _PATH_RE):
-        m = regex.match(parsed.path)
-        if m:
-            locale = m.group("locale")
-            lang = locale.lower() if locale and "dramaboxdb" in host else None
-            ep = _EP_NUMBER_RE.search(parsed.path) if regex is _EP_PATH_RE else None
-            return BookRef(m.group("id"), lang, int(ep.group(1)) if ep else None)
-
-    query = parse_qs(parsed.query)
-    episode = next((int(v) for v in query.get("ep", []) if v.isdigit()), None)
-    for key in _QUERY_KEYS:
-        for value in query.get(key, []):
-            if re.fullmatch(_BOOK_ID, value):
-                return BookRef(value, episode=episode)
-
-    m = _ANY_ID_RE.search(parsed.path + "?" + parsed.query)
-    if m:
-        return BookRef(m.group(1))
-
+    ref = registry.parse_link(parsed)
+    if ref:
+        return ref
     raise InputError(
         f"Impossible de trouver l'identifiant de la série dans : {text!r}\n"
-        "Formats acceptés : URL dramaboxdb.com / dramabox.com, lien de partage, "
-        "URL dramafren ou identifiant numérique (ex. 41000105199)."
+        f"Formats acceptés : {accepted_formats()}"
     )
+
+
+def accepted_formats() -> str:
+    links = ", ".join(p.example_link for p in registry.PROVIDERS)
+    return f"un lien de série ({links}), un n° de série DramaBox (ex. 41000105199) ou plateforme:n° (ex. goodshort:31000662271)."

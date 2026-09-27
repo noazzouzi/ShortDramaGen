@@ -8,12 +8,14 @@
 
 | Couche | Question | Source | Module |
 |---|---|---|---|
-| **Métadonnées** | *Quoi* télécharger ? (épisodes, IDs, durées, langue) | Site officiel (`__NEXT_DATA__`) | `official.py` |
-| **Résolution** | *Où* est le fichier ? (URL signée valide) | API dramafren, puis MP4 officiel (ép. 1-10) en secours | `dramafren.py`, `pipeline.resolve_episode` |
-| **Téléchargement** | *Comment* le récupérer de façon fiable ? | CDN direct (HTTP Range) | `download.py`, `mp4.py` |
+| **Métadonnées** | *Quoi* télécharger ? (épisodes, IDs, durées, langue) | Site officiel de la plateforme | `providers/<plateforme>.py` (DramaBox : `official.py`) |
+| **Résolution** | *Où* est le fichier ? (URL signée valide) | Propre à la plateforme (DramaBox : API dramafren, puis MP4 officiel des ép. 1-10) | `providers/<plateforme>.py` |
+| **Téléchargement** | *Comment* le récupérer de façon fiable ? | CDN direct : un MP4 (HTTP Range) ou une playlist HLS | `download.py`, `hls.py`, `mp4.py` |
 
-La source fragile (dramafren) reste isolée dans un module. Si elle change, on
-ne touche qu'à ce fichier.
+Tout ce qui dépend d'une plateforme passe par l'interface `Provider`
+(§7) : le pipeline, les jobs, la bibliothèque et l'interface web n'en
+connaissent aucune en particulier. Pour DramaBox, la source fragile (dramafren)
+reste isolée dans `dramafren.py`.
 
 ## 2. Vue d'ensemble
 
@@ -617,14 +619,20 @@ venait à protéger son API (voir [03](03-brainstorm-et-roadmap.md)).
 shortdramagen/
 ├── __main__.py      # python -m shortdramagen
 ├── cli.py           # sous-commandes info / fetch / links / film / ui
-├── models.py        # BookRef, Series, Episode, VideoSource
-├── inputs.py        # URL -> BookRef, plages d'épisodes
-├── errors.py        # codes d'erreur stables
+├── models.py        # BookRef, Series, Episode, VideoSource, ref_key
+├── inputs.py        # URL ou plateforme:n° -> BookRef (via le registre), plages d'épisodes
+├── errors.py        # codes d'erreur stables, SeriesNotFound, ResolveError
+├── providers/       # une plateforme par module (§7)
+│   ├── base.py      #   interface Provider
+│   ├── registry.py  #   plateformes connues, analyse des liens
+│   ├── dramabox.py  #   DramaBox (official + dramafren + cdn)
+│   └── goodshort.py #   GoodShort (site officiel, épisodes gratuits en HLS)
 ├── official.py      # métadonnées dramaboxdb.com
-├── dramafren.py     # API get_video
-├── cdn.py           # formule de chemin, expiration
+├── dramafren.py     # API get_video (DramaBox)
+├── cdn.py           # formule de chemin, expiration (DramaBox)
 ├── http.py          # client urllib (retries sur erreurs réseau et 5xx)
-├── download.py      # téléchargement reprenable + contrôles
+├── download.py      # téléchargement reprenable + contrôles, affiche
+├── hls.py           # épisodes HLS : segments reprenables, remux MP4 par ffmpeg
 ├── mp4.py           # durée, codecs, edit lists d'un MP4 (sans ffmpeg)
 ├── film.py          # fusion en un seul film (ffmpeg) + chapitres
 ├── manifest.py      # état par série
@@ -644,15 +652,53 @@ tests/
 └── test_*.py
 ```
 
-## 7. Extensibilité multi-plateformes
+## 7. Plateformes (`providers/`)
 
-dramafren expose le même schéma pour d'autres plateformes (sous-domaines
-`dramapops.`, `reelshort.`…). Il est probable que chacune ait son
-`cdn-<plateforme>.dramafren.org/index.php?action=get_video`, mais ce n'est
-pas vérifié. Pour en ajouter une, il faudrait :
-- un module de métadonnées (ou le mode sonde si aucun site officiel n'est
-  exploitable) ;
-- l'endpoint dramafren correspondant ;
-- la règle de validation d'URL propre à son CDN.
+Le moteur est indépendant de la plateforme. Chaque plateforme est un module de
+`providers/` qui implémente `Provider` (`providers/base.py`) :
 
-`download`, `manifest`, `mp4` et la CLI restent partagés.
+| Méthode / attribut | Rôle |
+|---|---|
+| `name`, `label`, `hosts` | identifiant stocké (`goodshort`), nom affiché, domaines de ses liens |
+| `parse_link(url)` | le `BookRef` d'un lien de la plateforme (id, épisode, slug) |
+| `series_link(id, slug)` | ce qu'on retape pour retrouver la série (réparations, commandes affichées) |
+| `fetch_series(http, ref, lang)` | métadonnées officielles ; `errors.SeriesNotFound` sinon |
+| `resolve(http, series, ep, …)` | toutes les sources d'un épisode (`VideoSource`, MP4 ou HLS) ; `errors.ResolveError` sinon |
+| `availability(http, series, …)` | la série est-elle téléchargeable maintenant ? (aperçu) |
+| `can_probe`, `probe_series`, `probe_first` | détection sans site officiel (DramaBox seulement) |
+| `expires_at(url)` | expiration d'une URL signée, pour le manifest |
+| `home_url`, `source_urls` | sondés par `connectivity` |
+
+`registry.py` liste les plateformes. Un lien est confié à celle qui revendique
+son domaine ; un domaine inconnu garde les règles souples de DramaBox (les
+liens de partage de l'app changent de domaine).
+
+**Identifier une série.** `BookRef.provider` + `book_id`. La référence
+`ref_key` s'écrit `41000105199` pour DramaBox (inchangé) et
+`goodshort:31000662271` ailleurs. C'est elle qu'on tape (`sdg fetch
+goodshort:31000662271`), qui sert de route web (`#/serie/goodshort:…/vo`) et
+qui regroupe les versions dans la bibliothèque. Les dossiers des autres
+plateformes sont préfixés : `goodshort-31000662271-perfect-love/`. Le manifest
+enregistre la plateforme dans `platform` (déjà présent, valait toujours
+`dramabox`) et les jobs dans `provider`. Les données anciennes, sans ces
+champs, sont lues comme DramaBox.
+
+**Épisodes gratuits seulement.** `Series.free_only` : la plateforme n'est
+téléchargée que depuis son site officiel, donc seuls ses épisodes gratuits le
+sont. « Tous les épisodes » veut alors dire les gratuits
+(`pipeline.default_selection`), enregistrés comme sélection dans le manifest :
+les épisodes payants apparaissent « non demandés » et la série est complète
+quand tous les gratuits sont là. Un épisode payant demandé explicitement
+échoue en `ep_unavailable`.
+
+**HLS.** Une source `kind="hls"` passe par `hls.py` : playlist (la meilleure
+variante d'une playlist maître), segments téléchargés dans l'ordre et reprenables,
+remux en MP4 par ffmpeg (sans ré-encodage), puis les mêmes contrôles de durée.
+Les fichiers de travail sont tous des `E001.*.part`, que la bibliothèque, la
+file et la corbeille savent déjà gérer. Les flux chiffrés sont refusés
+(`hls_unsupported`). ffmpeg est donc nécessaire pour les plateformes HLS.
+
+**Ajouter une plateforme** : un module dans `providers/` et une ligne dans
+`registry.PROVIDERS` ; côté web, une entrée dans `PROVIDERS` de `detect.js`
+(mêmes règles de liens) ; un jeu de données de test anonymisé. L'état de
+l'étude des plateformes est dans [05 — Plateformes](05-plateformes.md).

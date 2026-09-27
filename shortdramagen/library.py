@@ -29,9 +29,12 @@ from typing import Callable
 
 from . import errors, film, fsutil
 from .manifest import FILENAME, ManifestError, read_json
+from .models import ref_key
 from .pipeline import COVER_FILE
+from .providers import registry
 
-KEY_RE = re.compile(r"^\d{6,20}-[a-z0-9][a-z0-9._-]{0,159}$")
+# "<id>-<slug>" (DramaBox) or "<platform>-<id>-<slug>" (pipeline.series_dir_name)
+KEY_RE = re.compile(r"^(?:[a-z][a-z0-9]{1,19}-)?\d{6,20}-[a-z0-9][a-z0-9._-]{0,159}$")
 _EPISODE_FILE_RE = re.compile(r"^E(\d{3,4})\.mp4$")
 _PART_FILE_RE = re.compile(r"^E(\d{3,4})\..*\.part$")
 _URL_RE = re.compile(r"\b(?:https?|ftp)://\S+", re.IGNORECASE)
@@ -142,6 +145,7 @@ def _in(n: int, wanted) -> bool:
 def describe(key: str, data: dict, files: DirContents) -> tuple[dict, list[dict]]:
     """Summary and episode list of one version: the manifest reconciled with the disk."""
     book_id = str(data.get("book_id") or key.split("-", 1)[0])
+    provider = registry.get(data.get("platform") if data.get("platform") in registry.names() else None)
     source_book_id = str(data.get("source_book_id") or book_id)
     title = str(data.get("title") or book_id)
     from_official = data.get("from_official")
@@ -212,15 +216,20 @@ def describe(key: str, data: dict, files: DirContents) -> tuple[dict, list[dict]
         state = "interrupted"
     elif counts["failed"] or counts["unavailable"] or counts["missing"]:
         state = "failed"
-    elif len(present) + counts["removed"] < len(episodes):
-        state = "incomplete"
+    elif len(present) + counts["removed"] < len(episodes) - (counts["not_requested"] if data.get("free_only") else 0):
+        state = "incomplete"  # on a free-only platform, the paid episodes can never be downloaded
     else:
         state = "complete"
 
     languages = [str(x) for x in data.get("languages") or [] if isinstance(x, str)]
     summary = {
         "series_key": key,
+        "provider": provider.name,
+        "provider_label": provider.label,
+        "ref": ref_key(provider.name, book_id),
+        "free_only": bool(data.get("free_only")),
         "book_id": book_id,
+        "slug": str(data.get("slug") or "") or None,
         "source_book_id": source_book_id,
         "lang": str(data.get("lang") or ""),
         "is_original": source_book_id == book_id,
@@ -528,8 +537,8 @@ class LibraryIndex:
         views = {v.key: self._view(v, jobs, ignored)[0] for v in versions}
         groups: dict[str, list[Version]] = {}
         for v in versions:
-            groups.setdefault(v.summary["book_id"], []).append(v)
-        out_groups = [self._group(book_id, vs, preferred_langs, title_lang, views) for book_id, vs in groups.items()]
+            groups.setdefault(v.summary["ref"], []).append(v)
+        out_groups = [self._group(ref, vs, preferred_langs, title_lang, views) for ref, vs in groups.items()]
         out_groups.sort(key=lambda g: g["updated_at"] or "", reverse=True)
 
         episodes_bytes = sum(v.summary["episodes_bytes"] for v in versions)
@@ -572,7 +581,7 @@ class LibraryIndex:
 
         return sorted(vs, key=rank)
 
-    def _group(self, book_id: str, vs: list[Version], preferred_langs, title_lang: str, views: dict) -> dict:
+    def _group(self, ref: str, vs: list[Version], preferred_langs, title_lang: str, views: dict) -> dict:
         vs = self._order(vs)
         summaries = [views[v.key] for v in vs]
         original = next((s for s in summaries if s["is_original"]), None)
@@ -590,7 +599,10 @@ class LibraryIndex:
             languages += [lang for lang in s["languages"] if lang not in languages]
         cover = next((s["cover_url"] for s in ([original] if original else []) + summaries if s["cover_url"]), None)
         return {
-            "book_id": book_id,
+            "ref": ref,
+            "provider": summaries[0]["provider"],
+            "provider_label": summaries[0]["provider_label"],
+            "book_id": summaries[0]["book_id"],
             "display_title": display,
             "title_vo": title_vo,
             "titles": {(s["lang"] or "vo"): s["title"] for s in summaries},
@@ -606,7 +618,7 @@ class LibraryIndex:
         jobs, ignored = self.job_overlay(), self.ignored()
         summary, episodes = self._view(v, jobs, ignored)
         siblings = []
-        for s in self._order([x for x in self._all() if x.summary["book_id"] == v.summary["book_id"]]):
+        for s in self._order([x for x in self._all() if x.summary["ref"] == v.summary["ref"]]):
             view = self._view(s, jobs, ignored)[0]
             siblings.append({
                 "series_key": s.key, "lang": view["lang"], "is_original": view["is_original"], "title": view["title"],

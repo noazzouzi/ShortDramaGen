@@ -7,7 +7,8 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, film, inputs, official, pipeline
+from . import __version__, errors, film, inputs, pipeline
+from .providers import registry
 from .http import TRANSIENT_ERRORS, Http, HttpStatusError
 from .inputs import InputError, parse_input
 from .manifest import ManifestError
@@ -32,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(p: argparse.ArgumentParser) -> None:
-        p.add_argument("url", help="URL dramaboxdb.com / dramabox.com / dramafren, lien de partage ou identifiant")
+        p.add_argument("url", help="lien d'une série (DramaBox, GoodShort), n° DramaBox ou plateforme:n°")
         p.add_argument("--lang", help="langue (en, fr, es, ...) : version doublée si elle existe")
 
     def selection(p: argparse.ArgumentParser) -> None:
@@ -112,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     except InputError as e:
         print(e, file=sys.stderr)
         return 2
-    except (official.SeriesNotFound, film.FilmError, ManifestError) as e:
+    except (errors.SeriesNotFound, film.FilmError, ManifestError) as e:
         print(e, file=sys.stderr)
         return 1
     except (HttpStatusError, *TRANSIENT_ERRORS) as e:
@@ -135,7 +136,8 @@ def cmd_info(args, log) -> int:
 
     preview = pipeline.preview_series(http, ref, args.lang, pipeline.FetchControl(on_event=on_event))
     series = preview.series
-    free = [ep.number for ep in series.episodes if ep.free_url]
+    free = series.free_numbers
+    print(f"Plateforme   : {registry.get(series.provider).label}")
     print(f"Titre        : {series.title}")
     if series.title_vo and series.title_vo != series.title:
         print(f"Titre VO     : {series.title_vo}")
@@ -148,10 +150,12 @@ def cmd_info(args, log) -> int:
     print(f"Langues      : {', '.join(series.languages)}")
     if series.introduction:
         print(f"\n{series.introduction}")
-    if preview.available:
-        print(f"\ndramafren    : OK (dernier épisode dispo en {', '.join(preview.qualities)})")
+    if not preview.available:
+        print(f"\nSource       : indisponible ({preview.source_error})")
+    elif series.free_only:
+        print("\nSource       : site officiel, épisodes gratuits seulement")
     else:
-        print(f"\ndramafren    : indisponible ({preview.source_error})")
+        print(f"\nSource       : OK (dernier épisode dispo en {', '.join(preview.qualities)})")
     return 0
 
 
@@ -159,7 +163,8 @@ def cmd_fetch(args, log) -> int:
     http, ref = Http(), parse_input(args.url)
     ffmpeg = film.find_ffmpeg(args.ffmpeg) if args.film else None  # fail before downloading
     opts = pipeline.FetchOptions(
-        out_dir=args.out, lang=args.lang, quality=args.quality, jobs=args.jobs, episodes=args.episodes
+        out_dir=args.out, lang=args.lang, quality=args.quality, jobs=args.jobs, episodes=args.episodes,
+        ffmpeg_path=args.ffmpeg,
     )
     result = pipeline.fetch(http, ref, opts, log)
     n_ok = len(result.done) + len(result.skipped)
@@ -232,11 +237,13 @@ def cmd_links(args, log) -> int:
     opts = pipeline.FetchOptions(lang=args.lang, quality=args.quality, episodes=args.episodes)
     series, links = pipeline.resolve_links(http, ref, opts, log)
     if args.json:
-        print(json.dumps({"title": series.title, "book_id": series.book_id, "episodes": links}, ensure_ascii=False, indent=2))
+        data = {"title": series.title, "provider": series.provider, "book_id": series.book_id, "episodes": links}
+        print(json.dumps(data, ensure_ascii=False, indent=2))
     else:
         for link in links:
             print(link["url"])
-    return 0 if len(links) == len(pipeline.select_episodes(series, opts.episodes, lambda _: None)) else 1
+    wanted = pipeline.default_selection(series, opts.episodes)
+    return 0 if len(links) == len(pipeline.select_episodes(series, wanted, lambda _: None)) else 1
 
 
 def cmd_ui(args, log) -> int:

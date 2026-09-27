@@ -77,7 +77,7 @@ export function menuItems(ctx, version, detail) {
 
 export function fetchCommand(version, extra = "") {
   const lang = version.is_original ? "" : ` --lang ${version.lang}`;
-  return `python -m shortdramagen fetch ${version.book_id}${lang}${extra}`;
+  return `python -m shortdramagen fetch ${version.ref}${lang}${extra}`;
 }
 
 // Dialogue Supprimer (spec E8), pour une version ou plusieurs (sélection).

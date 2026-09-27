@@ -1,0 +1,25 @@
+{
+  "NotFound404Staus": false,
+  "NotFound410Staus": false,
+  "BookInfoModule": {
+    "nullBook": false,
+    "book": {
+      "bookId": "31000662271",
+      "bookName": "Perfect Love",
+      "seoBookName": "Perfect Love",
+      "cover": "https://acf.goodshort.com/videobook/202404/cover-kwkvKgdllc.jpg",
+      "introduction": "Talented jewelry designer Ada Prescott's life has hit a low point.",
+      "chapterCount": 56,
+      "language": "ENGLISH",
+      "bookResourceUrl": "perfect-love-31000662271",
+      "writeStatus": "COMPLETE"
+    },
+    "chapterVoList": [
+      {"id": 6439092, "bookId": "31000662271", "chapterName": "001", "price": 0, "index": 0, "playTime": 118, "m3u8Path": "https://v3.goodshort.com/mts/books/271/31000662271/272611/aaaaaaaaaa/origin1/ep001.m3u8?expiredTime=4102444800&tul=00"},
+      {"id": 6439093, "bookId": "31000662271", "chapterName": "002", "price": 0, "index": 1, "playTime": 68, "m3u8Path": "https://v3.goodshort.com/mts/books/271/31000662271/272611/bbbbbbbbbb/origin1/ep002.m3u8?expiredTime=4102444800&tul=00"},
+      {"id": 6439094, "bookId": "31000662271", "chapterName": "003", "price": 0, "index": 2, "playTime": 31, "m3u8Path": "https://v3.goodshort.com/mts/books/271/31000662271/272611/cccccccccc/origin1/ep003.m3u8?expiredTime=4102444800&tul=00"},
+      {"id": 6439095, "bookId": "31000662271", "chapterName": "004", "price": 22, "index": 3, "playTime": 58},
+      {"id": 6439096, "bookId": "31000662271", "chapterName": "005", "price": 18, "index": 4, "playTime": 41}
+    ]
+  }
+}

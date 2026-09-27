@@ -79,7 +79,7 @@ class InfoAndErrorsTest(unittest.TestCase):
             code, out, _ = run(["info", "41000105199"])
         self.assertEqual(code, 0)
         self.assertIn("One Night to Forever", out)
-        self.assertIn("dramafren    : OK (dernier épisode dispo en 1080p, 720p)", out)
+        self.assertIn("Source       : OK (dernier épisode dispo en 1080p, 720p)", out)
 
     def test_network_errors_are_readable(self):
         with mock.patch("shortdramagen.pipeline.preview_series", side_effect=urllib.error.URLError("hors ligne")):

@@ -77,7 +77,7 @@ class Manifest:
         previous = {e["number"]: e for e in data.get("episodes", []) if isinstance(e, dict) and "number" in e}
         data.update(
             schema_version=SCHEMA_VERSION,
-            platform="dramabox",
+            platform=series.provider,
             book_id=series.book_id,
             source_book_id=series.source_book_id,
             lang=series.lang,
@@ -88,6 +88,7 @@ class Manifest:
             introduction=series.introduction,
             languages=series.languages,
             from_official=series.from_official,
+            free_only=series.free_only,
             episode_count=series.episode_count,
             total_duration_ms=series.total_duration_ms,
         )

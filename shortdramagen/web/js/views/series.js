@@ -10,7 +10,7 @@ import { parseRanges } from "./add.js";
 import { fetchCommand, firstPlayable, menuItems, openDeleteDialog, runPrimary } from "./common.js";
 
 export function theaterHref(group, version, target) {
-  return `#/serie/${group.book_id}/${versionSlug(version)}/lire/${target}`;
+  return `#/serie/${group.ref}/${versionSlug(version)}/lire/${target}`;
 }
 
 function majorityQuality(detail) {
@@ -74,7 +74,7 @@ function tabs(ctx, group, detail) {
     const problem = v.state === "failed" || v.state === "interrupted";
     return h(
       "a",
-      { class: "tab", href: `#/serie/${group.book_id}/${versionSlug(v)}`, "aria-current": v.series_key === detail.series_key ? "page" : null, title: v.title },
+      { class: "tab", href: `#/serie/${group.ref}/${versionSlug(v)}`, "aria-current": v.series_key === detail.series_key ? "page" : null, title: v.title },
       versionLong(v),
       h("span", { class: `tab-status num ${ok ? "is-ok" : problem ? "is-problem" : ""}` }, ok ? icon("check", { size: 12 }) : null, `${k.present}/${k.total}`, problem ? " !" : ""),
     );
@@ -83,11 +83,11 @@ function tabs(ctx, group, detail) {
   const vo = group.versions.find((v) => v.is_original);
   const others = (group.languages_available || []).filter((l) => !have.has(l) && l !== vo?.lang);
   for (const l of others.slice(0, 3)) {
-    items.push(h("button", { class: "tab is-add", type: "button", title: `Ajouter la version ${langName(l)}`, onclick: () => ctx.openAdd(group.book_id, { lang: l }) }, icon("plus", { size: 14 }), capitalize(langName(l))));
+    items.push(h("button", { class: "tab is-add", type: "button", title: `Ajouter la version ${langName(l)}`, onclick: () => ctx.openAdd(group.ref, { lang: l }) }, icon("plus", { size: 14 }), capitalize(langName(l))));
   }
   if (others.length > 3) {
     const more = h("button", { class: "tab is-add", type: "button", "aria-haspopup": "menu" }, "+ Autres ▾");
-    more.addEventListener("click", () => openMenu(more, others.slice(3).map((l) => ({ label: capitalize(langName(l)), onClick: () => ctx.openAdd(group.book_id, { lang: l }) })), { label: "Autres langues" }));
+    more.addEventListener("click", () => openMenu(more, others.slice(3).map((l) => ({ label: capitalize(langName(l)), onClick: () => ctx.openAdd(group.ref, { lang: l }) })), { label: "Autres langues" }));
     items.push(more);
   }
   return h("nav", { class: "tabs", "aria-label": "Versions" }, items);
@@ -626,6 +626,7 @@ function techSection(detail) {
     h("summary", { text: "Détails techniques" }),
     h("div", {},
       h("dl", {},
+        kv("Plateforme", detail.provider_label),
         kv("N° de série", detail.book_id),
         kv("N° vidéo de la version", detail.source_book_id),
         kv("Langue", detail.lang ? `${langName(detail.lang)} (${detail.lang})` : "—"),

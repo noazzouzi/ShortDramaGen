@@ -92,8 +92,8 @@ def media_cover(app: "App", req: "Request", key: str):
     return _file(app.library.cover_file(key), "image/jpeg", req, cache="private, max-age=86400")
 
 
-def media_preview_cover(app: "App", req: "Request", book_id: str, lang: str):
-    return _file(actions.preview_cover(app, book_id, lang), "image/jpeg", req, cache="private, max-age=86400")
+def media_preview_cover(app: "App", req: "Request", ref: str, lang: str):
+    return _file(actions.preview_cover(app, ref, lang), "image/jpeg", req, cache="private, max-age=86400")
 
 
 # --- routing -----------------------------------------------------------------------------
@@ -125,7 +125,7 @@ ROUTES: list[tuple[re.Pattern, dict[str, Handler]]] = [
     (re.compile(rf"^/media/series/{_KEY}/film$"), {"GET": media_film}),
     (re.compile(rf"^/media/series/{_KEY}/film/chapters\.vtt$"), {"GET": media_chapters}),
     (re.compile(rf"^/media/series/{_KEY}/cover$"), {"GET": media_cover}),
-    (re.compile(r"^/media/preview/(?P<book_id>\d{6,20})/(?P<lang>[a-z]{2,3}|vo)/cover$"), {"GET": media_preview_cover}),
+    (re.compile(r"^/media/preview/(?P<ref>(?:[a-z]+:)?\d{6,20})/(?P<lang>[a-z]{2,3}|vo)/cover$"), {"GET": media_preview_cover}),
 ]
 
 

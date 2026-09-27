@@ -19,6 +19,8 @@ SIZE_MISMATCH = "size_mismatch"  # fewer bytes than announced
 DURATION_MISMATCH = "duration_mismatch"  # MP4 duration differs from the official one
 MP4_UNREADABLE = "mp4_unreadable"  # not an MP4 (HTML page, truncated file…)
 QUALITY_UNAVAILABLE = "quality_unavailable"  # strict quality requested and not offered
+HLS_UNSUPPORTED = "hls_unsupported"  # encrypted stream, or a playlist this engine cannot read
+REMUX_FAILED = "remux_failed"  # ffmpeg could not turn the HLS segments into an MP4
 NETWORK = "network"
 DISK_FULL = "disk_full"
 FILE_LOCKED = "file_locked"  # Windows: file open in a player
@@ -35,6 +37,18 @@ FILM_EXISTS = "film_exists"
 FILM_DURATION = "film_duration"  # the joined file does not have the expected duration
 FILM_FAILED = "film_failed"  # ffmpeg error
 CANCELLED = "cancelled"
+
+
+class SeriesNotFound(Exception):
+    """The platform does not know this series (missing or empty page)."""
+
+
+class ResolveError(Exception):
+    """No usable video URL for an episode. ``code``: ep_unavailable (the source said so), network, url_mismatch…"""
+
+    def __init__(self, message: str, code: str = EP_UNAVAILABLE):
+        super().__init__(message)
+        self.code = code
 
 
 def code_for(exc: BaseException) -> str:

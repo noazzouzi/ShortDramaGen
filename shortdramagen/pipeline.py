@@ -1,4 +1,7 @@
-"""Orchestration: metadata -> URL resolution -> parallel downloads.
+"""Orchestration: metadata -> URL resolution -> parallel downloads, for any platform.
+
+Everything specific to a platform (links, metadata, where videos come from)
+lives in ``providers``; this module only talks to the Provider interface.
 
 ``fetch`` can be driven from outside through a ``FetchControl``: stop event,
 shared rate limiter, forced re-downloads, strict quality and structured events.
@@ -22,20 +25,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import cdn, dramafren, errors, official
-from .download import IntegrityError, UrlRejected, check_duration, download
+from . import errors, hls
+from .download import IntegrityError, UrlRejected, check_duration, download, download_cover
 from .http import TRANSIENT_ERRORS, Http, HttpStatusError
 from .inputs import EpisodeRanges
 from .manifest import Listener, Manifest, now_iso
-from .models import BookRef, Episode, Series, VideoSource, quality_from_text
+from .models import DEFAULT_PROVIDER, BookRef, Episode, Series, VideoSource
+from .providers import registry
 
 Log = Callable[[str], None]
 EventHandler = Callable[[str, dict], None]
 
 MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY = 2.0  # seconds; attempt n waits n × this before the next one
-MAX_PROBED_EPISODES = 1000
-DEFAULT_API_INTERVAL = 0.3  # seconds between two dramafren API calls
+DEFAULT_API_INTERVAL = 0.3  # seconds between two calls to a source API
 PROGRESS_INTERVAL = 0.25  # seconds between two episode_progress events of one episode
 BYTES_PER_EPISODE_1080P = 11_300_000  # measured average over 62 episodes (docs/01), for estimates
 COVER_FILE = "cover.jpg"
@@ -46,7 +49,7 @@ class Cancelled(Exception):
 
 
 class RateLimiter:
-    """Spaces out calls to the dramafren API (politeness). One can be shared by several runs."""
+    """Spaces out calls to a source API (politeness). One can be shared by several runs."""
 
     def __init__(self, interval: float):
         self.interval = interval
@@ -74,6 +77,7 @@ class FetchOptions:
     jobs: int = 3
     episodes: EpisodeRanges | None = None
     api_interval: float = DEFAULT_API_INTERVAL
+    ffmpeg_path: str | None = None  # for HLS episodes; None: PATH or imageio-ffmpeg
 
 
 @dataclass
@@ -111,19 +115,26 @@ class Preview:
 
     ref: BookRef
     series: Series
-    available: bool  # the source answers for the last episode
+    available: bool  # the platform can deliver episodes of this series now
     qualities: list[str]
     source_error: str | None = None
     source_error_code: str | None = None
 
     def estimated_bytes(self) -> dict[str, int]:
-        # Only 1080p has a measured basis; other qualities are not estimated.
+        # Only DramaBox 1080p has a measured basis; other qualities and platforms are not estimated.
+        if self.series.free_only:
+            return {}
         return {"1080p": self.series.episode_count * BYTES_PER_EPISODE_1080P}
 
     def to_dict(self) -> dict:
         s = self.series
+        provider = registry.get(s.provider)
         durations = [ep.duration_ms / 1000 for ep in s.episodes if ep.duration_ms]
         return {
+            "provider": provider.name,
+            "provider_label": provider.label,
+            "ref": s.key,
+            "free_only": s.free_only,
             "book_id": s.book_id,
             "source_book_id": s.source_book_id,
             "lang": s.lang,
@@ -138,7 +149,7 @@ class Preview:
             "episode_ref": self.ref.episode,
             "duration_s": round(sum(durations), 3) if durations else None,
             "episode_duration_s": {"min": min(durations), "max": max(durations)} if durations else None,
-            "free_episodes": [ep.number for ep in s.episodes if ep.free_url],
+            "free_episodes": s.free_numbers,
             "availability": {
                 "source": "ok" if self.available else "unavailable",
                 "checked_episode": s.episodes[-1].number if s.episodes else None,
@@ -161,20 +172,23 @@ def load_series(
     limiter: RateLimiter | None = None,
     control: FetchControl | None = None,
 ) -> tuple[Series, dict]:
-    """Official metadata, or probing dramafren when the official page is missing.
+    """Official metadata, or probing the source when the official page is missing (DramaBox).
 
     Returns the series and the sources already obtained while probing.
     Raises Cancelled if the control is stopped during a probe.
     """
     control = control or FetchControl()
+    provider = registry.get(ref.provider)
     lang = lang or ref.lang
     try:
-        series = official.fetch_series(http, ref.book_id, lang)
-    except official.SeriesNotFound as e:
-        log(f"Attention : {e}. Détection des épisodes via dramafren (sans contrôle de durée).")
+        series = provider.fetch_series(http, ref, lang)
+    except errors.SeriesNotFound as e:
+        if not provider.can_probe:
+            raise
+        log(f"Attention : {e}. Détection des épisodes à la source (sans contrôle de durée).")
         control.emit("probe_started", book_id=ref.book_id)
         limiter = limiter or control.limiter or RateLimiter(DEFAULT_API_INTERVAL)
-        return probe_series(http, ref.book_id, limiter, control)
+        return provider.probe_series(http, ref, limiter, control)
     if lang and series.languages and lang not in series.languages:
         log(
             f"Attention : langue « {lang} » indisponible pour cette série, version originale utilisée "
@@ -184,56 +198,25 @@ def load_series(
     return series, {}
 
 
-def probe_series(
-    http: Http, book_id: str, limiter: RateLimiter, control: FetchControl | None = None
-) -> tuple[Series, dict]:
-    control = control or FetchControl()
-    episodes: list[Episode] = []
-    sources: dict[int, list[VideoSource]] = {}
-    for number in range(1, MAX_PROBED_EPISODES + 1):
-        limiter.wait(control.stop)
-        try:
-            found = dramafren.get_video(http, book_id, number)
-        except dramafren.ResolveError:
-            break
-        media_id = cdn.media_id_from_url(found[0].url) or ""
-        episodes.append(Episode(number=number, chapter_id=media_id, media_id=media_id))
-        sources[number] = found
-        control.emit("probe_progress", found=number)
-    if not episodes:
-        raise official.SeriesNotFound(f"Aucun épisode trouvé pour {book_id}, ni sur le site officiel ni sur dramafren")
-    series = Series(
-        book_id=book_id,
-        source_book_id=book_id,
-        lang="",
-        title=book_id,
-        slug="serie",
-        episodes=episodes,
-        from_official=False,
-    )
-    return series, sources
-
-
 def preview_series(
     http: Http, ref: BookRef, lang: str | None = None, control: FetchControl | None = None
 ) -> Preview:
-    """Official metadata plus one availability check on the last episode.
+    """Official metadata plus one availability check.
 
     Never probes and never writes anything: a series missing from the official
-    site raises official.SeriesNotFound, and the caller decides whether to probe.
+    site raises errors.SeriesNotFound, and the caller decides whether to probe.
     """
     control = control or FetchControl()
+    provider = registry.get(ref.provider)
     lang = lang or ref.lang
-    series = official.fetch_series(http, ref.book_id, lang)
+    series = provider.fetch_series(http, ref, lang)
     if lang and series.languages and lang not in series.languages:
         control.emit("lang_fallback", requested=lang, used=series.lang, available=series.languages)
-    try:
-        if control.limiter:
-            control.limiter.wait(control.stop)
-        sources = dramafren.get_video(http, series.source_book_id, series.episodes[-1].number)
-    except dramafren.ResolveError as e:
-        return Preview(ref, series, False, [], str(e), errors.code_for(e))
-    return Preview(ref, series, True, [s.quality for s in sources])
+    found = provider.availability(http, series, control.limiter, control.stop)
+    if not found.available:
+        error = found.error or errors.ResolveError("source indisponible")
+        return Preview(ref, series, False, [], str(error), errors.code_for(error))
+    return Preview(ref, series, True, found.qualities)
 
 
 # --- resolution ---------------------------------------------------------------
@@ -246,28 +229,8 @@ def resolve_episode(
     limiter: RateLimiter | None = None,
     stop: threading.Event | None = None,
 ) -> list[VideoSource]:
-    """Every usable source for an episode.
-
-    dramafren (all episodes, up to 1080p) plus the official free MP4
-    (episodes 1-10, 720p). URLs that do not point at this episode are dropped.
-    """
-    sources: list[VideoSource] = []
-    error = None
-    try:
-        if limiter:
-            limiter.wait(stop)
-        sources = dramafren.get_video(http, series.source_book_id, ep.number)
-    except dramafren.ResolveError as e:
-        error = e
-    if series.from_official:
-        sources = [s for s in sources if cdn.matches_episode(s.url, series.source_book_id, ep.media_id)]
-    if ep.free_url:
-        sources.append(VideoSource(ep.free_url, quality_from_text(ep.free_url), "official"))
-    if not sources:
-        if error:
-            raise error
-        raise dramafren.ResolveError("aucune URL ne correspond à cet épisode", errors.URL_MISMATCH)
-    return sources
+    """Every usable source for an episode, as the series' platform finds them."""
+    return registry.get(series.provider).resolve(http, series, ep, limiter, stop)
 
 
 def rank_sources(sources: list[VideoSource], quality: str, strict: bool = False) -> list[VideoSource]:
@@ -280,7 +243,7 @@ def rank_sources(sources: list[VideoSource], quality: str, strict: bool = False)
         exact = [s for s in sources if s.height == target]
         if not exact:
             offered = ", ".join(sorted({s.quality for s in sources if s.quality}, reverse=True)) or "aucune"
-            raise dramafren.ResolveError(
+            raise errors.ResolveError(
                 f"qualité {quality} indisponible (proposées : {offered})", errors.QUALITY_UNAVAILABLE
             )
         return exact
@@ -309,8 +272,15 @@ def _beyond(wanted: EpisodeRanges | None, count: int) -> list[str]:
     ]
 
 
+def default_selection(series: Series, wanted: EpisodeRanges | None) -> EpisodeRanges | None:
+    """What "every episode" means: all of them, or only the free ones on a free-only platform."""
+    if wanted is not None or not series.free_only:
+        return wanted
+    return as_ranges(series.free_numbers)
+
+
 def select_episodes(series: Series, wanted: EpisodeRanges | None, log: Log) -> list[Episode]:
-    if not wanted:
+    if wanted is None:
         return list(series.episodes)
     count = series.episode_count
     beyond = _beyond(wanted, count)
@@ -321,6 +291,8 @@ def select_episodes(series: Series, wanted: EpisodeRanges | None, log: Log) -> l
 
 def series_dir_name(series: Series) -> str:
     name = f"{series.book_id}-{series.slug}"
+    if series.provider != DEFAULT_PROVIDER:  # DramaBox folders keep the name they always had
+        name = f"{series.provider}-{name}"
     if series.source_book_id != series.book_id and series.lang:
         name += f"-{series.lang}"
     return name
@@ -342,8 +314,13 @@ def fetch(
     control = control or FetchControl()
     limiter = control.limiter or RateLimiter(opts.api_interval)
     series, prefetched = load_series(http, ref, opts.lang, log, limiter, control)
-    episodes = select_episodes(series, opts.episodes, log)
-    ignored = _beyond(opts.episodes, series.episode_count)
+    provider = registry.get(series.provider)
+    wanted = default_selection(series, opts.episodes)
+    if wanted is not opts.episodes:
+        log(f"{provider.label} : {len(series.free_numbers)} épisodes gratuits sur {series.episode_count}, "
+            "les seuls téléchargeables depuis le site officiel")  # fmt: skip
+    episodes = select_episodes(series, wanted, log)
+    ignored = _beyond(wanted, series.episode_count)
     if ignored:
         control.emit("selection_clipped", episode_count=series.episode_count, ignored=ignored)
     series_dir = opts.out_dir / series_dir_name(series)
@@ -351,7 +328,7 @@ def fetch(
     requested = {
         "lang": opts.lang or ref.lang,
         "quality": opts.quality,
-        "episodes": [list(r) for r in opts.episodes] if opts.episodes else None,
+        "episodes": [list(r) for r in wanted] if wanted is not None else None,
         "at": now_iso(),
     }
     manifest = Manifest.open(series_dir, series, requested if control.record_request else None, control.manifest_listener)
@@ -363,6 +340,7 @@ def fetch(
     log(f"« {series.title} » : {series.episode_count} épisodes -> {series_dir}")
     control.emit(
         "series_loaded",
+        provider=series.provider,
         book_id=series.book_id,
         source_book_id=series.source_book_id,
         lang=series.lang,
@@ -400,7 +378,7 @@ def fetch(
         dest = series_dir / f"E{n:03d}.mp4"
         if dest.exists() and n not in control.force:
             try:
-                check_duration(dest, ep.duration_ms)
+                check_duration(dest, ep.duration_ms, series.duration_tolerance_s)
                 size = dest.stat().st_size
                 manifest.update(n, status="done", file=dest.name, bytes=size)
                 result.skipped.append(n)
@@ -421,12 +399,12 @@ def fetch(
                 ranked = rank_sources(sources, opts.quality, control.strict_quality)
             except Cancelled:
                 return cancelled(n)
-            except dramafren.ResolveError as e:
+            except errors.ResolveError as e:
                 error, code = str(e), errors.code_for(e)
-                break  # both endpoints (with retries) already failed, or the quality does not exist
+                break  # the source (with retries) already failed, or the quality does not exist
             wanted = opts.quality if opts.quality != "best" else ranked[0].quality
             for source in ranked:
-                expires = cdn.expires_at(source.url)
+                expires = provider.expires_at(source.url)
                 manifest.update(
                     n,
                     status="downloading",
@@ -437,7 +415,7 @@ def fetch(
                 )
                 control.emit("episode_started", n=n, quality=source.quality, origin=source.origin, attempt=attempt)
                 try:
-                    size = download(http, source.url, dest, ep.duration_ms, progress_callback(n))
+                    size = download_source(http, source, dest, series, ep, progress_callback(n), opts.ffmpeg_path)
                 except Cancelled:
                     return cancelled(n)
                 except (UrlRejected, IntegrityError) as e:
@@ -514,31 +492,61 @@ def _ensure_cover(http: Http, series: Series, series_dir: Path, manifest: Manife
     cover = series_dir / COVER_FILE
     if series.cover and not cover.exists():
         try:
-            official.download_cover(http, series.cover, cover)
+            download_cover(http, series.cover, cover)
         except (HttpStatusError, ValueError, *TRANSIENT_ERRORS) as e:
             control.emit("cover_failed", message=str(e))
     if cover.exists() and manifest.data.get("cover_file") != COVER_FILE:
         manifest.set("cover_file", COVER_FILE)
 
 
+def download_source(
+    http: Http,
+    source: VideoSource,
+    dest: Path,
+    series: Series,
+    ep: Episode,
+    on_progress: Callable[[int, int], None] | None = None,
+    ffmpeg_path: str | None = None,
+) -> int:
+    """One episode from one source: a single MP4, or an HLS playlist remuxed into an MP4."""
+    if source.kind == "hls":
+        return hls.download_hls(
+            http, source.url, dest, ep.duration_ms, on_progress, series.duration_tolerance_s, ffmpeg_path=ffmpeg_path
+        )
+    return download(http, source.url, dest, ep.duration_ms, on_progress, series.duration_tolerance_s)
+
+
+def as_ranges(numbers: list[int]) -> EpisodeRanges:
+    """[1, 2, 3, 7] -> [(1, 3), (7, 7)]."""
+    ranges: EpisodeRanges = []
+    for n in sorted(numbers):
+        if ranges and ranges[-1][1] == n - 1:
+            ranges[-1] = (ranges[-1][0], n)
+        else:
+            ranges.append((n, n))
+    return ranges
+
+
 def resolve_links(http: Http, ref: BookRef, opts: FetchOptions, log: Log = print) -> tuple[Series, list[dict]]:
     """Resolve without downloading (for external tools such as aria2c or IDM)."""
     limiter = RateLimiter(opts.api_interval)
     series, prefetched = load_series(http, ref, opts.lang, log, limiter)
+    provider = registry.get(series.provider)
     links = []
-    for ep in select_episodes(series, opts.episodes, log):
+    for ep in select_episodes(series, default_selection(series, opts.episodes), log):
         try:
             sources = prefetched.get(ep.number) or resolve_episode(http, series, ep, limiter)
-        except dramafren.ResolveError as e:
+        except errors.ResolveError as e:
             log(f"E{ep.number:03d} ÉCHEC : {e}")
             continue
         source = pick_source(sources, opts.quality)
-        expires = cdn.expires_at(source.url)
+        expires = provider.expires_at(source.url)
         links.append(
             {
                 "episode": ep.number,
                 "file": f"E{ep.number:03d}.mp4",
                 "quality": source.quality,
+                "kind": source.kind,
                 "url": source.url,
                 "expires_at": expires.isoformat() if expires else None,
             }

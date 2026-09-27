@@ -22,7 +22,7 @@ from typing import Callable
 from . import errors, fsutil, mp4
 from .manifest import FILENAME as MANIFEST_FILENAME
 from .manifest import Manifest, now_iso, read_json
-from .models import BookRef
+from .models import DEFAULT_PROVIDER, BookRef
 
 Progress = Callable[[float, float], None]  # (seconds done, total seconds)
 Log = Callable[[str], None]
@@ -107,14 +107,18 @@ class FilmResult:
 def find_series_dir(out_dir: Path, ref: BookRef, lang: str | None = None) -> Path:
     """Folder created by ``sdg fetch`` for this series (no network needed)."""
     candidates = []
-    for d in sorted(out_dir.glob(f"{ref.book_id}-*")):
+    # DramaBox folders start with the id; other platforms' with "<platform>-<id>" (pipeline.series_dir_name)
+    prefix = ref.book_id if ref.provider == DEFAULT_PROVIDER else f"{ref.provider}-{ref.book_id}"
+    for d in sorted(out_dir.glob(f"{prefix}-*")):
         manifest = d / MANIFEST_FILENAME
         if d.is_dir() and manifest.exists():
-            candidates.append((d, read_json(manifest)))
+            data = read_json(manifest)
+            if (data.get("platform") or DEFAULT_PROVIDER) == ref.provider:
+                candidates.append((d, data))
     if not candidates:
         raise FilmError(
-            f"Aucun téléchargement trouvé pour {ref.book_id} dans {out_dir}. "
-            f"Lance d'abord : sdg fetch {ref.book_id}",
+            f"Aucun téléchargement trouvé pour {ref.key} dans {out_dir}. "
+            f"Lance d'abord : sdg fetch {ref.key}",
             errors.SERIES_DIR_NOT_FOUND,
         )
     lang = lang or ref.lang

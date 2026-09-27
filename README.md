@@ -2,7 +2,8 @@
 
 Récupère automatiquement **tous les épisodes** d'une série DramaBox à partir
 d'une simple URL : jusqu'en 1080p, avec reprise sur coupure et vérification
-de chaque fichier. L'outil peut ensuite les **fusionner en un seul film** avec
+de chaque fichier. Pour GoodShort, il récupère les épisodes gratuits du site
+officiel. L'outil peut ensuite les **fusionner en un seul film** avec
 un chapitre par épisode.
 
 ```text
@@ -28,7 +29,8 @@ python -m shortdramagen --help        # utilisable tel quel
 pip install -e .                      # optionnel : ajoute la commande « sdg »
 ```
 
-Pour la **fusion en film**, il faut aussi ffmpeg. Le plus simple est
+Pour la **fusion en film** et pour les plateformes servies en HLS
+(GoodShort), il faut aussi ffmpeg. Le plus simple est
 `pip install imageio-ffmpeg` (ou `pip install -e ".[ffmpeg]"`), qui fournit
 ffmpeg sans installation système. Sinon : `winget install Gyan.FFmpeg`
 (Windows), `brew install ffmpeg` (macOS) ou `apt install ffmpeg` (Linux).
@@ -118,9 +120,13 @@ python -m shortdramagen ui --window              # fenêtre d'application Edge/C
   les requêtes des autres sites. Les liens signés de la source ne sont
   jamais affichés.
 
-**Entrées acceptées** : URL `dramaboxdb.com` (série ou épisode, avec ou sans
-`/fr/`), `dramabox.com/drama/…`, lien de partage de l'app, URL dramafren
-(`detail` ou `watch`), ou l'identifiant seul (`41000105199`).
+**Entrées acceptées** :
+- **DramaBox** : URL `dramaboxdb.com` (série ou épisode, avec ou sans `/fr/`),
+  `dramabox.com/drama/…`, lien de partage de l'app, URL dramafren (`detail` ou
+  `watch`), ou l'identifiant seul (`41000105199`).
+- **GoodShort** : URL `goodshort.com/drama/…`, `/episodes/…` ou `/episode/…`,
+  ou `goodshort:31000662271`. Seuls les épisodes gratuits du site officiel
+  sont téléchargés ; sans `-e`, « tout » veut dire ces épisodes-là.
 
 **Langue** : par défaut, la version de l'URL (VO en général). `--lang fr`,
 `es`, `ko`… prend la version doublée si elle existe. Sinon l'outil prévient et
@@ -141,6 +147,10 @@ downloads/41000105199-one-night-to-forever-fr/
 ```
 
 ## Comment ça marche
+
+Le moteur est commun à toutes les plateformes ; ce qui est propre à chacune
+(liens, métadonnées, sources vidéo) vit dans `shortdramagen/providers/`
+(voir [architecture §7](docs/02-architecture.md#7-plateformes-providers)). Pour DramaBox :
 
 1. **Métadonnées** depuis le site officiel `dramaboxdb.com` : liste des
    épisodes, durées exactes, identifiant de la version doublée.
@@ -164,11 +174,12 @@ downloads/41000105199-one-night-to-forever-fr/
 | [02 — Architecture](docs/02-architecture.md) | Composants, flux, manifest, moteur pilotable (événements, codes d'erreur), choix techniques |
 | [03 — Brainstorm & roadmap](docs/03-brainstorm-et-roadmap.md) | Approches comparées, risques, plans B, suite |
 | [04 — Frontend](docs/04-frontend.md) | Interface web : recherche, 3 concepts et jury, spec, système visuel, API, maquette, avancement (étapes 0 à 3 livrées) |
+| [05 — Plateformes](docs/05-plateformes.md) | Plateformes au-delà de DramaBox : état de l'étude, constats GoodShort, points non vérifiés |
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests      # 132 tests, hors ligne, environ 15 s
+python -m unittest discover -s tests      # 151 tests, hors ligne, environ 20 s
 # (4 tests de fusion utilisent un vrai ffmpeg ; ils sont ignorés s'il est absent)
 ```
 

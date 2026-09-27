@@ -2,7 +2,7 @@
 // « À traiter », actions sur les cartes, sélection multiple.
 
 import { append, codeBox, h, icon } from "../dom.js";
-import { EXAMPLE_URL, detect } from "../detect.js";
+import { ACCEPTED, EXAMPLE_URL, detect } from "../detect.js";
 import { bytes, duration, htmlLang, plural, shortWhen, versionShort, versionSlug } from "../format.js";
 import { FILTERS, counts, filmReady, groupProblem, matchFilter, primaryAction, toTreat, versionMeta } from "../status.js";
 import { openMenu, openPopover } from "../ui.js";
@@ -32,7 +32,7 @@ export function mainVersion(group) {
 }
 
 export function seriesHref(group, version) {
-  return `#/serie/${group.book_id}/${versionSlug(version)}`;
+  return `#/serie/${group.ref}/${versionSlug(version)}`;
 }
 
 function coverImage(url, cls = "") {
@@ -122,11 +122,11 @@ function card(ctx, group, selected) {
       : null;
   if (band) coverBox.append(band);
 
-  const link = h("a", { class: "poster-link", href, "aria-label": accessibleName(group, status, version), dataset: { book: group.book_id } });
+  const link = h("a", { class: "poster-link", href, "aria-label": accessibleName(group, status, version), dataset: { book: group.ref } });
   const check = h(
     "label",
     { class: "poster-check", title: "Sélectionner" },
-    h("input", { type: "checkbox", checked: selected || null, "aria-label": `Sélectionner ${group.display_title}`, onclick: (e) => ctx.toggleSelect(group.book_id, e.shiftKey) }),
+    h("input", { type: "checkbox", checked: selected || null, "aria-label": `Sélectionner ${group.display_title}`, onclick: (e) => ctx.toggleSelect(group.ref, e.shiftKey) }),
   );
   const more = h("button", { class: "btn-icon btn-icon-sm poster-more btn-scrim", type: "button", "aria-label": `Actions pour ${group.display_title}`, "aria-haspopup": "menu", "aria-expanded": "false" }, icon("more"));
   more.addEventListener("click", () => openMenu(more, menuItems(ctx, focus, ctx.state.details.get(focus.series_key)?.data), { label: `Actions pour ${group.display_title}` }));
@@ -139,7 +139,7 @@ function card(ctx, group, selected) {
   const incomplete = focus.state !== "complete";
   return h(
     "article",
-    { class: `poster${selected ? " is-selected" : ""}`, dataset: { book: group.book_id } },
+    { class: `poster${selected ? " is-selected" : ""}`, dataset: { book: group.ref } },
     coverBox,
     h(
       "div",
@@ -161,11 +161,11 @@ function listView(ctx, groups, selection) {
     const problem = groupProblem(group);
     const film = group.versions.map((v) => v.film).find((f) => f && f.bytes);
     const qualities = Object.keys(focus.qualities || {}).join(", ");
-    const selected = selection.has(group.book_id);
+    const selected = selection.has(group.ref);
     return h(
       "tr",
-      { class: selected ? "is-selected" : "", dataset: { book: group.book_id } },
-      h("td", {}, h("input", { type: "checkbox", checked: selected || null, "aria-label": `Sélectionner ${group.display_title}`, onclick: (e) => ctx.toggleSelect(group.book_id, e.shiftKey) })),
+      { class: selected ? "is-selected" : "", dataset: { book: group.ref } },
+      h("td", {}, h("input", { type: "checkbox", checked: selected || null, "aria-label": `Sélectionner ${group.display_title}`, onclick: (e) => ctx.toggleSelect(group.ref, e.shiftKey) })),
       h("td", {}, h("div", { class: "list-cover" }, group.cover_url ? coverImage(group.cover_url) : null)),
       h("td", { class: "list-title" }, h("a", { href: seriesHref(group, version), lang: htmlLang(version.lang), text: group.display_title }),
         group.title_vo && group.title_vo !== group.display_title ? h("span", { class: "muted", lang: "en", text: group.title_vo }) : null),
@@ -254,7 +254,7 @@ function shelf(ctx, groups) {
 // --- barre de sélection ------------------------------------------------------------------------------------
 
 function selectionBar(ctx, groups, selection) {
-  const chosen = groups.filter((g) => selection.has(g.book_id));
+  const chosen = groups.filter((g) => selection.has(g.ref));
   if (!chosen.length) return null;
   const versions = chosen.flatMap((g) => g.versions);
   const size = chosen.reduce((s, g) => s + groupBytes(g), 0);
@@ -283,7 +283,7 @@ function selectionBar(ctx, groups, selection) {
 // --- états vides --------------------------------------------------------------------------------------------
 
 function emptyState(ctx, library) {
-  const field = h("input", { class: "hero-input", type: "text", placeholder: "Colle le lien d'une série DramaBox", "aria-label": "Lien d'une série DramaBox", "data-autofocus": true, autocomplete: "off" });
+  const field = h("input", { class: "hero-input", type: "text", placeholder: "Colle le lien d'une série", "aria-label": "Lien d'une série", "data-autofocus": true, autocomplete: "off" });
   const go = () => {
     const d = detect(field.value);
     if (d.kind !== "empty") ctx.openAdd(field.value);
@@ -295,9 +295,9 @@ function emptyState(ctx, library) {
     "section",
     { class: "empty-hero" },
     h("h1", { tabindex: "-1", text: "Ta bibliothèque est vide" }),
-    h("p", { class: "lead", text: "Colle le lien d'une série DramaBox : on récupère tous les épisodes, vérifiés, jusqu'en 1080p." }),
+    h("p", { class: "lead", text: "Colle le lien d'une série : on récupère ses épisodes, vérifiés." }),
     h("div", { class: "hero-field" }, icon("download", { size: 20 }), field),
-    h("p", { class: "note", text: "Liens acceptés : dramaboxdb.com, dramabox.com, lien de partage de l'app, dramafren, ou le n° de série." }),
+    h("p", { class: "note", text: ACCEPTED }),
     h("button", { class: "btn btn-ghost", type: "button", onclick: () => { field.value = EXAMPLE_URL; field.focus(); }, text: "Essayer avec un exemple" }),
     h(
       "div",
@@ -419,7 +419,7 @@ export function renderLibrary(main, ctx, route) {
     page.append(listView(ctx, shown, ctx.state.selection));
   } else {
     page.append(h("div", { class: "wall", role: "list", "aria-label": "Séries" }, shown.map((g) => {
-      const c = card(ctx, g, ctx.state.selection.has(g.book_id));
+      const c = card(ctx, g, ctx.state.selection.has(g.ref));
       c.setAttribute("role", "listitem");
       return c;
     })));

@@ -22,12 +22,7 @@ ENDPOINTS = (
 _HEADERS = {"Origin": "https://dramabox.dramafren.org", "Referer": "https://dramabox.dramafren.org/"}
 
 
-class ResolveError(Exception):
-    """No usable URL. ``code``: ep_unavailable (the source said so), network, url_mismatch…"""
-
-    def __init__(self, message: str, code: str = errors.EP_UNAVAILABLE):
-        super().__init__(message)
-        self.code = code
+ResolveError = errors.ResolveError  # shared by every platform
 
 
 def get_video(http: Http, book_id: str, episode: int, lang: str = "en") -> list[VideoSource]:

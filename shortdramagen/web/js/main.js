@@ -2,14 +2,14 @@
 //
 // Routes (spec §4.1) :
 //   #/                                   Bibliothèque   (?f=filtre&q=recherche&tri=…&vue=liste)
-//   #/serie/<bookId>/<vo|fr|es…>          Fiche d'une version
-//   #/serie/<bookId>/<v>/lire/<n|film>    Théâtre par-dessus la fiche
+//   #/serie/<ref>/<vo|fr|es…>             Fiche d'une version (ref : n° DramaBox ou plateforme:n°)
+//   #/serie/<ref>/<v>/lire/<n|film>       Théâtre par-dessus la fiche
 //   #/reglages/<section>                  Réglages
 //   #/activite                            Tiroir Activité (page sur mobile)
 
 import { makeActions } from "./actions.js";
 import { get } from "./api.js";
-import { detect } from "./detect.js";
+import { detect, linkLabel } from "./detect.js";
 import { append, clear, announce, h, icon } from "./dom.js";
 import { versionShort } from "./format.js";
 import { activity, applyJobEvent, connectEvents, renderPill } from "./live.js";
@@ -38,7 +38,7 @@ const state = {
   live: false,
   unreachable: false,
   query: "",
-  selection: new Set(), // book_id sélectionnés dans la bibliothèque
+  selection: new Set(), // ref des séries sélectionnées dans la bibliothèque
   selectionAnchor: null,
   seriesUi: new Map(), // series_key -> état d'interface de la fiche
 };
@@ -67,7 +67,7 @@ function parseRoute() {
 }
 
 function findVersion(bookId, v) {
-  const group = state.library?.groups.find((g) => g.book_id === bookId);
+  const group = state.library?.groups.find((g) => g.ref === bookId);
   if (!group) return {};
   const version = v === "vo"
     ? group.versions.find((x) => x.is_original) || group.versions[0]
@@ -125,7 +125,7 @@ const ctx = {
   toggleSelect(bookId, shift) {
     const route = parseRoute();
     const { shown } = filteredGroups(state.library, route.params, state.query);
-    const ids = shown.map((g) => g.book_id);
+    const ids = shown.map((g) => g.ref);
     if (shift && state.selectionAnchor && ids.includes(state.selectionAnchor)) {
       const [a, b] = [ids.indexOf(state.selectionAnchor), ids.indexOf(bookId)].sort((x, y) => x - y);
       ids.slice(a, b + 1).forEach((id) => state.selection.add(id));
@@ -195,7 +195,7 @@ async function loadLibrary() {
     if (res.status === 304) return false;
     state.library = res.data;
     state.libraryEtag = res.etag;
-    const known = new Set(res.data.groups.map((g) => g.book_id));
+    const known = new Set(res.data.groups.map((g) => g.ref));
     for (const id of [...state.selection]) if (!known.has(id)) state.selection.delete(id);
     return true;
   } catch (err) {
@@ -266,9 +266,9 @@ function renderOmniChip() {
   const link = d.kind === "id" || d.kind === "link" || d.kind === "batch";
   chip.hidden = !link;
   if (d.kind === "batch") chip.textContent = `${d.links.filter((l) => l.kind === "id" || l.kind === "link").length} liens · Entrée`;
-  else if (link) chip.textContent = `Lien DramaBox · série ${d.bookId}${d.lang ? ` · ${d.lang.toUpperCase()}` : ""} · Entrée`;
+  else if (link) chip.textContent = `${linkLabel(d)} · Entrée`;
   omni.closest(".field").classList.toggle("is-error", d.kind === "invalid");
-  document.getElementById("omni-aide").textContent = d.kind === "invalid" ? "Ce lien n'est pas reconnu : colle un lien DramaBox ou un n° de série." : "";
+  document.getElementById("omni-aide").textContent = d.kind === "invalid" ? "Ce lien n'est pas reconnu : colle le lien d'une série (DramaBox, GoodShort) ou un n° de série." : "";
   return d;
 }
 
@@ -276,7 +276,7 @@ function buildShell() {
   const bar = document.getElementById("topbar");
   const omni = h("input", {
     id: "recherche", type: "search", autocomplete: "off", spellcheck: "false",
-    placeholder: "Chercher une série ou coller un lien DramaBox", "aria-label": "Chercher une série ou coller un lien DramaBox",
+    placeholder: "Chercher une série ou coller un lien", "aria-label": "Chercher une série ou coller le lien d'une série",
     "aria-keyshortcuts": "Control+K", "aria-describedby": "omni-aide",
   });
   omni.addEventListener("input", () => {
@@ -529,8 +529,8 @@ function updateLive(progress) {
     }
   }
   if (view.name === "series" && job.series_key === view.key && job.kind === "film") render(true);
-  if (view.name === "library" && job.book_id && progress.episodes) {
-    const cover = main.querySelector(`.poster[data-book="${CSS.escape(job.book_id)}"] .poster-cover.is-coloring`);
+  if (view.name === "library" && job.ref && progress.episodes) {
+    const cover = main.querySelector(`.poster[data-book="${CSS.escape(job.ref)}"] .poster-cover.is-coloring`);
     const e = progress.episodes;
     if (cover && e.total) cover.style.setProperty("--p", ((e.done + e.skipped) / e.total).toFixed(3));
   }
@@ -841,13 +841,13 @@ function shortcuts() {
     if ((e.ctrlKey && e.key === "a") && view.name === "library") {
       e.preventDefault();
       const { shown } = filteredGroups(state.library, parseRoute().params, state.query);
-      shown.forEach((g) => state.selection.add(g.book_id));
+      shown.forEach((g) => state.selection.add(g.ref));
       render(true);
       return;
     }
     const poster = e.target instanceof HTMLElement ? e.target.closest(".poster") : null;
     if (poster) {
-      const group = state.library?.groups.find((g) => g.book_id === poster.dataset.book);
+      const group = state.library?.groups.find((g) => g.ref === poster.dataset.book);
       const version = group && mainVersion(group);
       if (version) {
         const key = e.key.toLowerCase();
@@ -877,7 +877,7 @@ function shortcuts() {
     }
   });
 
-  // Ctrl+V n'importe où (hors d'un champ) : un lien DramaBox ouvre directement l'aperçu.
+  // Ctrl+V n'importe où (hors d'un champ) : un lien de série ouvre directement l'aperçu.
   document.addEventListener("paste", (e) => {
     if (typing(e.target) || document.querySelector("dialog[open]")) return;
     const text = e.clipboardData?.getData("text") || "";
