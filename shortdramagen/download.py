@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
 import re
 import struct
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
-from . import errors, mp4
+from . import errors, fsutil, mp4
 from .http import Http, HttpStatusError
 
 CHUNK_SIZE = 256 * 1024
@@ -69,7 +68,7 @@ def download(
     if total and size != total:
         raise IntegrityError(f"téléchargement incomplet : {size} octets reçus sur {total}")
     check_duration(part, expected_duration_ms)
-    os.replace(part, dest)
+    fsutil.replace(part, dest)  # the antivirus may still be scanning the .part
     for stale in dest.parent.glob(f"{dest.stem}.*.part"):  # other qualities tried before
         stale.unlink(missing_ok=True)
     return size

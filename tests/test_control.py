@@ -9,7 +9,7 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
-from shortdramagen import errors, inputs, pipeline
+from shortdramagen import errors, fsutil, inputs, pipeline
 from shortdramagen.http import HttpStatusError
 from shortdramagen.manifest import Manifest
 from shortdramagen.models import BookRef
@@ -86,11 +86,55 @@ class ErrorCodesTest(unittest.TestCase):
                 self.assertEqual(errors.code_for(exc), code)
 
 
+def locked_for(times):
+    """os.replace that fails like Windows while another program has the file open."""
+    real, calls = fsutil.os.replace, []
+
+    def replace(src, dst):
+        calls.append((Path(src).name, Path(dst).name))
+        if len(calls) <= times:
+            raise PermissionError(13, "Access is denied", str(src), None, str(dst))
+        real(src, dst)
+
+    return replace, calls
+
+
+class FsutilTest(TempDirTest):
+    def test_replace_waits_for_the_lock(self):
+        (self.tmp / "a").write_text("new")
+        (self.tmp / "b").write_text("old")
+        replace, calls = locked_for(2)
+        with mock.patch.object(fsutil.os, "replace", replace), mock.patch.object(fsutil.time, "sleep") as sleep:
+            fsutil.replace(self.tmp / "a", self.tmp / "b")
+        self.assertEqual((self.tmp / "b").read_text(), "new")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], list(fsutil.DELAYS[:2]))
+
+    def test_replace_gives_up_after_about_3_seconds(self):
+        (self.tmp / "a").write_text("new")
+        replace, calls = locked_for(100)
+        with mock.patch.object(fsutil.os, "replace", replace), mock.patch.object(fsutil.time, "sleep") as sleep:
+            with self.assertRaises(PermissionError):
+                fsutil.replace(self.tmp / "a", self.tmp / "b")
+        self.assertEqual(len(calls), len(fsutil.DELAYS) + 1)
+        self.assertAlmostEqual(sum(c.args[0] for c in sleep.call_args_list), 3.0, delta=0.1)
+
+
 class ManifestTest(TempDirTest):
     def series(self):
         from shortdramagen import official
 
         return official.parse_page_props(fixture_json("official_en.json"), "41000105199")
+
+    def test_save_survives_a_windows_lock(self):
+        # sdg ui reading the manifest, or the antivirus scanning it, at the moment it is replaced
+        m = Manifest.open(self.tmp, self.series(), {"quality": "best"})
+        replace, calls = locked_for(3)
+        with mock.patch.object(fsutil.os, "replace", replace), mock.patch.object(fsutil.time, "sleep"):
+            m.update(1, status="done")
+        self.assertEqual(calls[-1], ("manifest.json.tmp", "manifest.json"))
+        self.assertEqual(Manifest.load(self.tmp).episode(1)["status"], "done")
+        self.assertFalse((self.tmp / "manifest.json.tmp").exists())
 
     def test_v2_fields_listener_and_stale_downloads(self):
         calls = []

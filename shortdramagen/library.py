@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from . import errors, film
+from . import errors, film, fsutil
 from .manifest import FILENAME, ManifestError, read_json
 from .pipeline import COVER_FILE
 
@@ -373,9 +373,7 @@ class IgnoredStore:
                 self._data.pop(key, None)
             self.version += 1
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_name(self.path.name + ".tmp")
-            tmp.write_text(json.dumps(self._data, ensure_ascii=False, indent=1), encoding="utf-8")
-            os.replace(tmp, self.path)
+            fsutil.write_text(self.path, json.dumps(self._data, ensure_ascii=False, indent=1))
             return current
 
 

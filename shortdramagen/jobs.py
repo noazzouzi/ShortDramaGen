@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import secrets
 import statistics
 import threading
@@ -30,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import errors, film, official, pipeline
+from . import errors, film, fsutil, official, pipeline
 from .connectivity import Connectivity
 from .events import EventBus
 from .http import TRANSIENT_ERRORS, HttpStatusError
@@ -297,7 +296,7 @@ class JobStore:
                     raise ValueError("not an object")
             except (OSError, ValueError, UnicodeDecodeError):
                 log.warning("jobs.json illisible, mis de côté")
-                os.replace(self.path, self.path.with_suffix(".bad"))
+                fsutil.replace(self.path, self.path.with_suffix(".bad"))
                 data = {}
         jobs = {}
         for raw in (data.get("jobs") or {}).values():
@@ -327,9 +326,7 @@ class JobStore:
         self.order = [i for i in self.order if i in self.jobs]
         data = {"schema": SCHEMA, "order": self.order, "jobs": {i: self.jobs[i].persist() for i in self.order}}
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-        os.replace(tmp, self.path)
+        fsutil.write_text(self.path, json.dumps(data, ensure_ascii=False, indent=1))
 
 
 # --- runner ----------------------------------------------------------------------------

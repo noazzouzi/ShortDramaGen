@@ -9,12 +9,12 @@ upgraded on the next ``open``.
 from __future__ import annotations
 
 import json
-import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from . import fsutil
 from .models import Series
 
 FILENAME = "manifest.json"
@@ -36,7 +36,7 @@ def now_iso() -> str:
 def read_json(path: Path) -> dict:
     """The manifest as a dict; a clear error instead of a traceback when it is corrupt."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(fsutil.read_text(path))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise ManifestError(f"{path} est illisible ({e}).") from None
     if not isinstance(data, dict):
@@ -73,7 +73,7 @@ class Manifest:
                 data = read_json(path)
             except ManifestError:
                 stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                os.replace(path, path.with_name(f"manifest.corrupt-{stamp}.json"))
+                fsutil.replace(path, path.with_name(f"manifest.corrupt-{stamp}.json"))
         previous = {e["number"]: e for e in data.get("episodes", []) if isinstance(e, dict) and "number" in e}
         data.update(
             schema_version=SCHEMA_VERSION,
@@ -156,9 +156,7 @@ class Manifest:
 
     def _save_locked(self) -> None:
         self.data["updated_at"] = now_iso()
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+        fsutil.write_text(self.path, json.dumps(self.data, ensure_ascii=False, indent=2))
 
     def _notify(self, number: int | None) -> None:
         if self.listener:

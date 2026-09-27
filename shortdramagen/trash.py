@@ -9,7 +9,6 @@ has open (a video player): each move is retried a few times, then reported as
 from __future__ import annotations
 
 import json
-import os
 import re
 import secrets
 import shutil
@@ -18,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
+from . import fsutil
 from .library import film_name_ok
 from .manifest import FILENAME, Manifest
 
@@ -38,15 +38,8 @@ class TrashError(Exception):
 
 
 def _move(src: Path, dst: Path) -> None:
-    """os.replace with a few retries: Windows keeps a file locked while a player reads it."""
-    for attempt in range(RETRIES):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if attempt == RETRIES - 1:
-                raise
-            time.sleep(RETRY_DELAY)
+    """Retried while Windows keeps a file locked (a player reading it, the antivirus)."""
+    fsutil.replace(src, dst)
 
 
 def _unlink(path: Path) -> None:

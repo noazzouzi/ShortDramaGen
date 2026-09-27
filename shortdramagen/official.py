@@ -7,11 +7,10 @@ URLs for the free episodes. See docs/01-etude-technique.md §5.
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 
-from . import cdn
+from . import cdn, fsutil
 from .http import Http, HttpStatusError
 from .models import Episode, Series
 
@@ -104,7 +103,7 @@ def download_cover(http: Http, url: str, dest: Path) -> int:
         raise ValueError("la cover reçue n'est pas une image JPEG")
     tmp = dest.with_name(dest.name + ".part")
     tmp.write_bytes(resp.body)
-    os.replace(tmp, dest)
+    fsutil.replace(tmp, dest)
     return len(resp.body)
 
 

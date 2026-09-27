@@ -17,6 +17,8 @@ import sys
 import threading
 from pathlib import Path
 
+from . import fsutil
+
 SETTINGS_FILE = "settings.json"
 SECRET_FILE = "secret"
 SERVER_FILE = "server.json"
@@ -63,9 +65,7 @@ def state_dir() -> Path:
 
 def _write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    fsutil.write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def _read_json(path: Path) -> dict:

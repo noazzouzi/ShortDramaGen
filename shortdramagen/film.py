@@ -8,7 +8,6 @@ takes seconds. Mixed formats (e.g. one 720p fallback in a 1080p series) need
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import struct
@@ -20,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import errors, mp4
+from . import errors, fsutil, mp4
 from .manifest import FILENAME as MANIFEST_FILENAME
 from .manifest import Manifest, now_iso, read_json
 from .models import BookRef
@@ -379,7 +378,7 @@ def build_film(
         raise FilmError(
             f"Film incorrect : durée {duration or 0:.1f} s au lieu de {expected:.1f} s attendues", errors.FILM_DURATION
         )
-    os.replace(tmp_output, output)
+    fsutil.replace(tmp_output, output)
     result = FilmResult(output, duration, output.stat().st_size, mode, len(plan.parts) if chapters else 0)
     _record_in_manifest(plan, result, chapter_marks(plan, reencode) if chapters else [])
     return result
