@@ -1,10 +1,13 @@
 import json
+import os
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
-from shortdramagen import cli, film, mp4
+from shortdramagen import cli, errors, film, mp4
 from shortdramagen.models import BookRef
 
 from fakes import audio_track, make_mp4, video_track
@@ -176,6 +179,79 @@ class FindSeriesDirTest(TempDirTest):
             film.find_series_dir(self.tmp, BookRef("41099999999"))
 
 
+class MakeFilmTest(TempDirTest):
+    """make_film and plan_summary without running ffmpeg."""
+
+    def test_existing_film_is_protected(self):
+        d = self.series(episodes=[(1, episode_bytes(10)), (2, episode_bytes(10))])
+        (d / "Qui Est la Véritable Mme Lafont.mp4").write_bytes(b"old film")
+        with self.assertRaises(film.FilmError) as ctx:
+            film.make_film(d, "ffmpeg-inexistant", log=lambda _: None)
+        self.assertEqual(ctx.exception.code, errors.FILM_EXISTS)
+        self.assertIn("--replace", str(ctx.exception))
+
+    def test_up_to_date_film_is_reused_without_ffmpeg(self):
+        d = self.series(episodes=[(1, episode_bytes(10)), (2, episode_bytes(10))], title="t")
+        out = d / "t.mp4"
+        out.write_bytes(b"x" * 10)
+        for ep in d.glob("E*.mp4"):
+            os.utime(ep, (1_000_000, 1_000_000))  # episodes older than the film
+        data = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+        data["film"] = {"file": "t.mp4", "episodes": [1, 2], "bytes": 10, "duration_s": 20.2, "mode": "copy", "chapters": 2}
+        (d / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+        result = film.make_film(d, "ffmpeg-inexistant", log=lambda _: None)
+        self.assertEqual((result.reused, result.chapters, result.size), (True, 2, 10))
+
+        os.utime(d / "E002.mp4")  # an episode changed after the film: no longer up to date
+        with self.assertRaises(film.FilmError) as ctx:
+            film.make_film(d, "ffmpeg-inexistant", log=lambda _: None)
+        self.assertEqual(ctx.exception.code, errors.FILM_EXISTS)
+
+    def test_error_codes(self):
+        d = self.series(episodes=[(1, episode_bytes(10)), (2, episode_bytes(10, avcc=AVCC_720, size=(720, 1280)))])
+        with self.assertRaises(film.FilmError) as ctx:
+            film.ensure_joinable(film.plan_film(d), reencode=False)
+        self.assertEqual(ctx.exception.code, errors.FILM_MIXED_FORMATS)
+        (d / "E002.mp4").unlink()
+        with self.assertRaises(film.FilmError) as ctx:
+            film.plan_film(d)
+        self.assertEqual(ctx.exception.code, errors.FILM_MISSING_EPISODES)
+        with self.assertRaises(film.FilmError) as ctx:
+            film.find_series_dir(self.tmp, BookRef("41099999999"))
+        self.assertEqual(ctx.exception.code, errors.SERIES_DIR_NOT_FOUND)
+        with self.assertRaises(film.FilmError) as ctx:
+            film.find_ffmpeg("/nulle/part/ffmpeg")
+        self.assertEqual(ctx.exception.code, errors.FFMPEG_MISSING)
+
+    def test_plan_summary_blocked_with_fixes(self):
+        d = self.series(episodes=[(1, episode_bytes(100)), (3, episode_bytes(30, avcc=AVCC_720, size=(720, 1280)))])
+        data = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+        data["episodes"] = [{"number": n} for n in (1, 2, 3)]
+        (d / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+        summary = film.plan_summary(d, ffmpeg=sys.executable)  # any existing file stands for ffmpeg
+        checks = summary["checks"]
+        self.assertFalse(summary["can_build"])
+        self.assertEqual(checks["episodes"]["missing"], [2])
+        self.assertEqual([g["quality"] for g in checks["format"]["groups"]], ["1080p", "720p"])
+        self.assertTrue(checks["ffmpeg"]["ok"])
+        self.assertEqual([f["action"] for f in summary["fixes"]], ["repair_then_film", "allow_missing", "reencode"])
+        repair, partial, reencode = summary["fixes"]
+        self.assertEqual((repair["download"], repair["redownload"], repair["quality"]), ([2], [3], "1080p"))
+        self.assertIn("(épisodes 1, 3)", partial["output_name"])
+        self.assertEqual((reencode["enabled"], reencode["reason"]), (False, "Des épisodes manquent aussi"))
+        self.assertFalse(film.plan_summary(d, ffmpeg="/nulle/part/ffmpeg")["checks"]["ffmpeg"]["ok"])
+
+    def test_plan_summary_ready(self):
+        d = self.series(episodes=[(1, episode_bytes(10)), (2, episode_bytes(10))])
+        summary = film.plan_summary(d, ffmpeg=sys.executable)
+        self.assertTrue(summary["can_build"])
+        self.assertEqual(summary["fixes"], [])
+        self.assertEqual(summary["checks"]["chapters"], 2)
+        self.assertEqual(film.plan_summary(self.tmp / "absent")["error"]["code"], errors.SERIES_DIR_NOT_FOUND)
+        (self.tmp / "vide").mkdir()
+        self.assertEqual(film.plan_summary(self.tmp / "vide")["error"]["code"], errors.NO_EPISODES)
+
+
 def _ffmpeg_or_none():
     try:
         return film.find_ffmpeg()
@@ -237,6 +313,22 @@ class RealFfmpegTest(TempDirTest):
         info = mp4.probe(result.path)
         self.assertEqual((info.video.width, info.video.height), (64, 128))
         self.assertEqual(self.chapters(result.path), 3)
+
+    def test_make_film_reuse_replace_and_cancel(self):
+        d = self.make_series(["64x128"] * 2)
+        first = film.make_film(d, FFMPEG, log=lambda _: None)
+        self.assertEqual((first.reused, first.chapters), (False, 2))
+        again = film.make_film(d, FFMPEG, log=lambda _: None)
+        self.assertTrue(again.reused)
+        replaced = film.make_film(d, FFMPEG, log=lambda _: None, replace=True)
+        self.assertFalse(replaced.reused)
+
+        stop = threading.Event()
+        stop.set()
+        with self.assertRaises(film.FilmError) as ctx:
+            film.make_film(d, FFMPEG, log=lambda _: None, output=self.tmp / "annule.mp4", stop=stop)
+        self.assertEqual(ctx.exception.code, errors.CANCELLED)
+        self.assertEqual(list(self.tmp.glob("annule*")), [])
 
     def test_cli(self):
         d = self.make_series(["64x128"] * 2)

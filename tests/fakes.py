@@ -8,9 +8,19 @@ import struct
 from contextlib import contextmanager
 from pathlib import Path
 
+from shortdramagen import dramafren
 from shortdramagen.http import HttpStatusError, Response
 
 FIXTURES = Path(__file__).parent / "fixtures"
+AKAMAI = "https://hwztakavideoto.dramaboxdb.com/" + "0" * 32 + "/6ad5b861"
+OFFICIAL_EN_URL = "https://www.dramaboxdb.com/movie/41000105199/"
+
+
+def cdn_url(book_id: str, media_id: str, quality: str) -> str:
+    """A signed-looking CDN URL whose path matches the episode (see cdn.expected_path)."""
+    r = book_id[::-1]
+    seg = media_id[-2:][::-1]
+    return f"{AKAMAI}/{seg}/{r[0]}x{r[1]}/{r[:2]}x{r[2]}/{r[:3]}x{r[3]}/{r}/{media_id}_1/{media_id}.{quality}.mp4"
 
 
 def fixture_json(name: str):
@@ -65,10 +75,37 @@ def make_mp4(duration_s: float, payload: int = 1000, timescale: int = 1000, trac
     return ftyp + box(b"moov", mvhd, *tracks) + box(b"mdat", bytes(payload))
 
 
+def series_http(dramafren_answers=None, broken=(), qualities=("720p", "1080p"), payload=5_000):
+    """FakeHttp for the 3-episode fixture (episodes 1, 2 and 28): official page, dramafren API
+    answers and CDN files. ``broken``: episodes whose dramafren URLs the CDN refuses (403)."""
+    props = fixture_json("official_en.json")
+    book = "41000105199"
+    pages = {OFFICIAL_EN_URL: official_html(props)}
+    files = {}
+    answers = dict(dramafren_answers or {})
+    for ch in props["chapterList"]:
+        number, media_id = ch["index"] + 1, ch["id"]
+        video = make_mp4(ch["duration"] / 1000, payload=payload)
+        sources = [{"quality": f"Server 1 {q}", "url": cdn_url(book, media_id, q)} for q in qualities]
+        for q in sources:
+            files[q["url"]] = 403 if number in broken else video
+        if ch.get("mp4"):
+            files[ch["mp4"]] = video
+        answers.setdefault(number, {"ok": True, "videoUrl": sources[0]["url"], "qualities": sources})
+
+    def api(url):
+        ep = int(url.split("&ep=")[1].split("&")[0])
+        return answers.get(ep, {"ok": False, "error": "Video unavailable"})
+
+    pages[dramafren.ENDPOINTS[0]] = api
+    pages[dramafren.ENDPOINTS[1]] = api
+    return FakeHttp(pages=pages, files=files)
+
+
 class FakeHttp:
     """Routes URLs to canned answers.
 
-    ``pages``: url prefix -> str (HTML) | dict/list (JSON) | int (HTTP status) | callable(url)
+    ``pages``: url prefix -> str (HTML) | bytes | dict/list (JSON) | int (HTTP status) | callable(url)
     ``files``: url prefix -> bytes (served with Range support) | int (HTTP status)
     """
 
@@ -93,7 +130,8 @@ class FakeHttp:
             raise HttpStatusError(url, answer)
         if isinstance(answer, (dict, list)):
             answer = json.dumps(answer)
-        return Response(url, 200, {}, answer.encode("utf-8"))
+        body = answer if isinstance(answer, bytes) else answer.encode("utf-8")
+        return Response(url, 200, {}, body)
 
     def get_json(self, url, headers=None):
         return self.get(url, headers).json()

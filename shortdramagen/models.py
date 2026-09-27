@@ -8,10 +8,11 @@ _QUALITY_RE = re.compile(r"(\d{3,4})p", re.IGNORECASE)
 
 @dataclass(frozen=True)
 class BookRef:
-    """What the user asked for: a book id and, optionally, a language."""
+    """What the user asked for: a book id and, optionally, a language and an episode."""
 
     book_id: str
     lang: str | None = None
+    episode: int | None = None  # set when the link points at one episode (/ep/…, dramafren watch)
 
 
 @dataclass
@@ -35,6 +36,12 @@ class Series:
     cover: str | None = None
     introduction: str = ""
     from_official: bool = True  # False when metadata was probed from dramafren only
+    title_vo: str | None = None  # title of the original version, when known
+
+    @property
+    def total_duration_ms(self) -> int | None:
+        durations = [ep.duration_ms for ep in self.episodes]
+        return sum(durations) if durations and all(durations) else None
 
     @property
     def episode_count(self) -> int:

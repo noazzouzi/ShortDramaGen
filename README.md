@@ -75,6 +75,11 @@ python -m shortdramagen film "downloads/41000105199-one-night-to-forever" -f "C:
 - **Épisodes manquants** : refus par défaut ; `--allow-missing` fusionne ce
   qui est là. Un film partiel est nommé `Titre (épisodes 1-10).mp4`.
 - Avec `fetch -e … --film`, le film contient exactement les épisodes demandés.
+  `fetch --film` accepte les mêmes options que `film` ; si des épisodes ont
+  échoué, le film n'est créé qu'avec `--allow-missing`.
+- **Film existant** : jamais écrasé en silence. S'il est à jour (mêmes
+  épisodes, aucun modifié depuis), il est simplement réutilisé ; sinon l'outil
+  refuse. `--replace` le reconstruit, `-f` choisit un autre nom.
 
 **Entrées acceptées** : URL `dramaboxdb.com` (série ou épisode, avec ou sans
 `/fr/`), `dramabox.com/drama/…`, lien de partage de l'app, URL dramafren
@@ -85,15 +90,17 @@ python -m shortdramagen film "downloads/41000105199-one-night-to-forever" -f "C:
 garde la VO (`info` liste les langues disponibles).
 
 **Relancer la même commande** ne fait que ce qui manque. C'est aussi comme ça
-qu'on reprend après une coupure ou un Ctrl+C.
+qu'on reprend après une coupure ou un Ctrl+C : les épisodes interrompus
+repartent de leur `.part`.
 
 ### Résultat
 
 ```text
 downloads/41000105199-one-night-to-forever-fr/
 ├── E001.mp4 … E062.mp4
+├── cover.jpg          # affiche de la série
 ├── Qui Est la Véritable Mme Lafont.mp4   # avec --film ou « sdg film »
-└── manifest.json      # titre, épisodes, statut, qualité, URL et expiration, taille, film
+└── manifest.json      # titre, épisodes, statut, qualité, URL et expiration, taille, code d'erreur, film
 ```
 
 ## Comment ça marche
@@ -117,15 +124,15 @@ downloads/41000105199-one-night-to-forever-fr/
 | Doc | Contenu |
 |---|---|
 | [01 — Étude technique](docs/01-etude-technique.md) | Constats vérifiés : API dramafren, CDN, site officiel, formats d'URL, cadre légal |
-| [02 — Architecture](docs/02-architecture.md) | Composants, flux, manifest, choix techniques |
+| [02 — Architecture](docs/02-architecture.md) | Composants, flux, manifest, moteur pilotable (événements, codes d'erreur), choix techniques |
 | [03 — Brainstorm & roadmap](docs/03-brainstorm-et-roadmap.md) | Approches comparées, risques, plans B, suite |
 | [04 — Frontend](docs/04-frontend.md) | Plan de l'interface web : recherche, 3 concepts et jury, spec, système visuel, API, maquette haute fidélité |
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests      # 42 tests, hors ligne, < 1 s
-# (3 tests de fusion utilisent un vrai ffmpeg ; ils sont ignorés s'il est absent)
+python -m unittest discover -s tests      # 70 tests, hors ligne, environ 1 s
+# (4 tests de fusion utilisent un vrai ffmpeg ; ils sont ignorés s'il est absent)
 ```
 
 ## Avertissement

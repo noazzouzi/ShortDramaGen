@@ -4,20 +4,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from shortdramagen import dramafren, mp4, pipeline
+from shortdramagen import mp4, pipeline
 from shortdramagen.download import IntegrityError, UrlRejected, download, part_path
 from shortdramagen.models import BookRef, VideoSource
 
-from fakes import FakeHttp, fixture_json, make_mp4, official_html
-
-AKAMAI = "https://hwztakavideoto.dramaboxdb.com/" + "0" * 32 + "/6ad5b861"
-
-
-def cdn_url(book_id: str, media_id: str, quality: str) -> str:
-    r = book_id[::-1]
-    seg = media_id[-2:][::-1]
-    return f"{AKAMAI}/{seg}/{r[0]}x{r[1]}/{r[:2]}x{r[2]}/{r[:3]}x{r[3]}/{r}/{media_id}_1/{media_id}.{quality}.mp4"
-
+from fakes import FakeHttp, cdn_url, make_mp4, series_http
 
 class TempDirTest(unittest.TestCase):
     def setUp(self):
@@ -104,28 +95,7 @@ class FetchTest(TempDirTest):
     """End to end on the 3-episode fixture (episodes 1, 2 and 28)."""
 
     def make_http(self, dramafren_answers=None, broken=()):
-        props = fixture_json("official_en.json")
-        book = "41000105199"
-        pages = {"https://www.dramaboxdb.com/movie/41000105199/": official_html(props)}
-        files = {}
-        answers = dramafren_answers or {}
-        for ch in props["chapterList"]:
-            number, media_id = ch["index"] + 1, ch["id"]
-            video = make_mp4(ch["duration"] / 1000, payload=5_000)
-            qualities = [{"quality": f"Server 1 {q}", "url": cdn_url(book, media_id, q)} for q in ("720p", "1080p")]
-            for q in qualities:
-                files[q["url"]] = 403 if number in broken else video
-            if ch.get("mp4"):
-                files[ch["mp4"]] = video
-            answers.setdefault(number, {"ok": True, "videoUrl": qualities[0]["url"], "qualities": qualities})
-
-        def api(url):
-            ep = int(url.split("&ep=")[1].split("&")[0])
-            return answers.get(ep, {"ok": False, "error": "Video unavailable"})
-
-        pages[dramafren.ENDPOINTS[0]] = api
-        pages[dramafren.ENDPOINTS[1]] = api
-        return FakeHttp(pages=pages, files=files)
+        return series_http(dramafren_answers, broken)
 
     def run_fetch(self, http, **kw):
         opts = pipeline.FetchOptions(out_dir=self.tmp, api_interval=0, **kw)

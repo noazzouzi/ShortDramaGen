@@ -4,36 +4,23 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
-from . import __version__, dramafren, film, official, pipeline
-from .http import Http
+from . import __version__, film, inputs, official, pipeline
+from .http import TRANSIENT_ERRORS, Http, HttpStatusError
 from .inputs import InputError, parse_input
+from .manifest import ManifestError
 
 QUALITIES = ("best", "1080p", "720p", "540p")
 
 
-def parse_episodes(spec: str | None) -> pipeline.EpisodeRanges | None:
-    """"1-10,28,50-" -> [(1, 10), (28, 28), (50, None)] (None = up to the last episode)."""
-    if not spec:
-        return None
-    ranges: pipeline.EpisodeRanges = []
-    for part in spec.split(","):
-        part = part.strip()
-        m = re.fullmatch(r"(\d+)(?:-(\d*))?", part)
-        if not m:
-            raise argparse.ArgumentTypeError(f"plage d'épisodes invalide : {part!r}")
-        start = int(m.group(1))
-        if m.group(2) is None:
-            ranges.append((start, start))
-        else:
-            end = int(m.group(2)) if m.group(2) else None
-            if end is not None and end < start:
-                raise argparse.ArgumentTypeError(f"plage d'épisodes à l'envers : {part!r}")
-            ranges.append((start, end))
-    return ranges
+def parse_episodes(spec: str | None) -> inputs.EpisodeRanges | None:
+    """argparse type for -e: inputs.parse_episodes with argparse's error type."""
+    try:
+        return inputs.parse_episodes(spec)
+    except InputError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     def ffmpeg_path(p: argparse.ArgumentParser) -> None:
         p.add_argument("--ffmpeg", help="chemin de ffmpeg (défaut : PATH, puis le paquet imageio-ffmpeg)")
 
+    def film_options(p: argparse.ArgumentParser, prefix: str = "") -> None:
+        p.add_argument("--reencode", action="store_true", help=f"{prefix}ré-encode tout (lent) : nécessaire si les qualités sont mélangées")
+        p.add_argument("--allow-missing", action="store_true", help=f"{prefix}fusionne même s'il manque des épisodes")
+        p.add_argument("--no-chapters", action="store_true", help=f"{prefix}n'ajoute pas un chapitre par épisode")
+        p.add_argument("--replace", action="store_true", help=f"{prefix}remplace un film existant (sinon il est gardé s'il est à jour)")
+
     p_info = sub.add_parser("info", help="affiche les infos de la série, sans rien télécharger")
     common(p_info)
     p_info.set_defaults(handler=cmd_info)
@@ -68,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     downloads_dir(p_fetch)
     p_fetch.add_argument("-j", "--jobs", type=int, default=3, help="téléchargements en parallèle (défaut : 3)")
     p_fetch.add_argument("--film", action="store_true", help="fusionne ensuite les épisodes en un seul film")
+    film_options(p_fetch, "avec --film : ")
     ffmpeg_path(p_fetch)
     p_fetch.set_defaults(handler=cmd_fetch)
 
@@ -84,9 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_film.add_argument("--lang", help="version à fusionner si plusieurs langues ont été téléchargées")
     downloads_dir(p_film)
     p_film.add_argument("-f", "--file", type=Path, help="film à créer (défaut : <dossier de la série>/<titre>.mp4)")
-    p_film.add_argument("--reencode", action="store_true", help="ré-encode tout (lent) : nécessaire si les qualités sont mélangées")
-    p_film.add_argument("--allow-missing", action="store_true", help="fusionne même s'il manque des épisodes")
-    p_film.add_argument("--no-chapters", action="store_true", help="n'ajoute pas un chapitre par épisode")
+    film_options(p_film)
     ffmpeg_path(p_film)
     p_film.set_defaults(handler=cmd_film)
     return parser
@@ -104,8 +96,11 @@ def main(argv: list[str] | None = None) -> int:
     except InputError as e:
         print(e, file=sys.stderr)
         return 2
-    except (official.SeriesNotFound, film.FilmError) as e:
+    except (official.SeriesNotFound, film.FilmError, ManifestError) as e:
         print(e, file=sys.stderr)
+        return 1
+    except (HttpStatusError, *TRANSIENT_ERRORS) as e:
+        print(f"Erreur réseau ou disque : {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("\nInterrompu. Relance la même commande pour reprendre.", file=sys.stderr)
@@ -114,23 +109,33 @@ def main(argv: list[str] | None = None) -> int:
 
 def cmd_info(args, log) -> int:
     http, ref = Http(), parse_input(args.url)
-    series, _ = pipeline.load_series(http, ref, args.lang, log)
+
+    def on_event(name: str, data: dict) -> None:
+        if name == "lang_fallback":
+            log(
+                f"Attention : langue « {data['requested']} » indisponible pour cette série, version originale "
+                f"utilisée (disponibles : {', '.join(data['available'])})"
+            )
+
+    preview = pipeline.preview_series(http, ref, args.lang, pipeline.FetchControl(on_event=on_event))
+    series = preview.series
     free = [ep.number for ep in series.episodes if ep.free_url]
     print(f"Titre        : {series.title}")
+    if series.title_vo and series.title_vo != series.title:
+        print(f"Titre VO     : {series.title_vo}")
     print(f"ID série     : {series.book_id}  (vidéos : {series.source_book_id}, langue : {series.lang or '?'})")
     print(f"Épisodes     : {series.episode_count}")
-    if series.from_official:
-        total_s = sum(ep.duration_ms or 0 for ep in series.episodes) / 1000
-        print(f"Durée totale : {int(total_s // 3600)} h {int(total_s % 3600 // 60):02d} min")
-        print(f"Gratuits     : {len(free)} sur le site officiel (épisodes {free[0]}-{free[-1]})" if free else "Gratuits     : aucun")
-        print(f"Langues      : {', '.join(series.languages)}")
+    total_ms = series.total_duration_ms
+    if total_ms:
+        print(f"Durée totale : {film.format_duration(total_ms / 1000)}")
+    print(f"Gratuits     : {len(free)} sur le site officiel (épisodes {free[0]}-{free[-1]})" if free else "Gratuits     : aucun")
+    print(f"Langues      : {', '.join(series.languages)}")
     if series.introduction:
         print(f"\n{series.introduction}")
-    try:
-        sources = dramafren.get_video(http, series.source_book_id, series.episodes[-1].number)
-        print(f"\ndramafren    : OK (dernier épisode dispo en {', '.join(s.quality for s in sources)})")
-    except dramafren.ResolveError as e:
-        print(f"\ndramafren    : indisponible ({e})")
+    if preview.available:
+        print(f"\ndramafren    : OK (dernier épisode dispo en {', '.join(preview.qualities)})")
+    else:
+        print(f"\ndramafren    : indisponible ({preview.source_error})")
     return 0
 
 
@@ -146,15 +151,22 @@ def cmd_fetch(args, log) -> int:
         f"\nTerminé : {n_ok} épisode(s) OK ({len(result.done)} téléchargé(s), "
         f"{len(result.skipped)} déjà présent(s)), {len(result.failed)} échec(s)."
     )
+    if result.stop_reason:
+        log("Arrêt avant la fin : libère de la place puis relance la même commande.")
+        return 1
     if result.failed:
         log(f"Épisodes en échec : {sorted(result.failed)}. Relance la même commande pour réessayer.")
-        if args.film:
-            log("Film non créé : il manque des épisodes.")
-        return 1
+        if args.film and not args.allow_missing:
+            log("Film non créé : il manque des épisodes (--allow-missing pour un film partiel).")
+            return 1
     if args.film:
+        # With -e, the film holds the requested episodes; otherwise the whole version.
         selected = set(result.done + result.skipped) if args.episodes else None
-        make_film(result.series_dir, ffmpeg, log, only=selected)
-    return 0
+        _make_film(
+            result.series_dir, ffmpeg, log, reencode=args.reencode, allow_missing=args.allow_missing,
+            chapters=not args.no_chapters, only=selected, replace=args.replace,
+        )  # fmt: skip
+    return 1 if result.failed else 0
 
 
 def cmd_film(args, log) -> int:
@@ -163,42 +175,19 @@ def cmd_film(args, log) -> int:
         series_dir = target
     else:
         series_dir = film.find_series_dir(args.out, parse_input(args.target), args.lang)
-    make_film(
-        series_dir,
-        film.find_ffmpeg(args.ffmpeg),
-        log,
-        output=args.file,
-        reencode=args.reencode,
-        allow_missing=args.allow_missing,
-        chapters=not args.no_chapters,
-    )
+    _make_film(
+        series_dir, film.find_ffmpeg(args.ffmpeg), log, output=args.file, reencode=args.reencode,
+        allow_missing=args.allow_missing, chapters=not args.no_chapters, replace=args.replace,
+    )  # fmt: skip
     return 0
 
 
-def make_film(
-    series_dir: Path,
-    ffmpeg: str,
-    log,
-    output: Path | None = None,
-    reencode: bool = False,
-    allow_missing: bool = False,
-    chapters: bool = True,
-    only: set[int] | None = None,
-) -> film.FilmResult:
-    plan = film.plan_film(series_dir, allow_missing, only)
-    film.ensure_joinable(plan, reencode)
-    if plan.missing:
-        log(f"Attention : épisodes absents, film incomplet (manquent : {film.format_ranges(plan.missing)})")
-    output = output or film.default_output(plan)
-    how = "avec ré-encodage, c'est long" if reencode else "sans ré-encodage"
-    log(f"Fusion de {len(plan.parts)} épisodes ({_hms(plan.duration)}, {how}) -> {output}")
+def _make_film(series_dir: Path, ffmpeg: str, log, **options) -> film.FilmResult:
     progress = _ProgressPrinter()
     try:
-        result = film.build_film(plan, output, ffmpeg, reencode, chapters, progress)
+        return film.make_film(series_dir, ffmpeg, log, on_progress=progress, **options)
     finally:
         progress.finish()
-    log(f"Film créé : {result.path} ({_hms(result.duration)}, {result.size / 1e6:.0f} Mo)")
-    return result
 
 
 class _ProgressPrinter:
@@ -220,12 +209,6 @@ class _ProgressPrinter:
     def finish(self) -> None:
         if self.tty and self.last >= 0:
             print(file=sys.stderr, flush=True)
-
-
-def _hms(seconds: float) -> str:
-    seconds = round(seconds)
-    h, m, s = seconds // 3600, seconds % 3600 // 60, seconds % 60
-    return f"{h} h {m:02d} min {s:02d} s" if h else f"{m} min {s:02d} s"
 
 
 def cmd_links(args, log) -> int:

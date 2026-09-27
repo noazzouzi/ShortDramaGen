@@ -22,13 +22,13 @@ class ParseInputTest(unittest.TestCase):
             "https://www.dramaboxdb.com/movie/41000105199/one-night-to-forever": BookRef("41000105199"),
             "https://www.dramaboxdb.com/fr/movie/41000105199/one-night-to-forever": BookRef("41000105199", "fr"),
             "www.dramaboxdb.com/es/movie/41000105199/": BookRef("41000105199", "es"),
-            "https://www.dramaboxdb.com/ep/41000105199_one-night-to-forever/577159363_Episode-28": BookRef("41000105199"),
-            "https://www.dramaboxdb.com/fr/ep/41000105199_one-night-to-forever/577159336_Episode-1": BookRef("41000105199", "fr"),
+            "https://www.dramaboxdb.com/ep/41000105199_one-night-to-forever/577159363_Episode-28": BookRef("41000105199", episode=28),
+            "https://www.dramaboxdb.com/fr/ep/41000105199_one-night-to-forever/577159336_Episode-1": BookRef("41000105199", "fr", 1),
             "https://www.dramabox.com/drama/41000105199/One-Night-to-Forever": BookRef("41000105199"),
             "https://www.dramaboxapp.com/drama/42000021382/Deny-Me-Dragon-King": BookRef("42000021382"),
             # dramafren's lang does not change the video, so it is ignored
             "https://dramabox.dramafren.org/index.php?page=detail&id=41000105199&lang=fr": BookRef("41000105199"),
-            "https://dramabox.dramafren.org/index.php?page=watch&id=41000105199&ep=28&lang=fr&slug=x": BookRef("41000105199"),
+            "https://dramabox.dramafren.org/index.php?page=watch&id=41000105199&ep=28&lang=fr&slug=x": BookRef("41000105199", episode=28),
             "https://example.app/share?bookId=41000105199&from=app": BookRef("41000105199"),
         }
         for text, expected in cases.items():

@@ -8,31 +8,36 @@ takes seconds. Mixed formats (e.g. one 720p fallback in a 1080p series) need
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from . import mp4
+from . import errors, mp4
 from .manifest import FILENAME as MANIFEST_FILENAME
-from .manifest import Manifest
+from .manifest import Manifest, now_iso, read_json
 from .models import BookRef
 
 Progress = Callable[[float, float], None]  # (seconds done, total seconds)
+Log = Callable[[str], None]
 
 _FORBIDDEN_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _EPISODE_FILE_RE = re.compile(r"^E(\d{3,})\.mp4$")
 
 
 class FilmError(Exception):
-    pass
+    """A film that cannot be made. ``code`` is one of the film codes of errors.py."""
+
+    def __init__(self, message: str, code: str = errors.FILM_FAILED):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass
@@ -93,6 +98,8 @@ class FilmResult:
     duration: float
     size: int
     mode: str  # "copy" or "reencode"
+    chapters: int = 0
+    reused: bool = False  # the existing film was already up to date: nothing was rebuilt
 
 
 # --- locating the downloads -----------------------------------------------------
@@ -104,11 +111,12 @@ def find_series_dir(out_dir: Path, ref: BookRef, lang: str | None = None) -> Pat
     for d in sorted(out_dir.glob(f"{ref.book_id}-*")):
         manifest = d / MANIFEST_FILENAME
         if d.is_dir() and manifest.exists():
-            candidates.append((d, json.loads(manifest.read_text(encoding="utf-8"))))
+            candidates.append((d, read_json(manifest)))
     if not candidates:
         raise FilmError(
             f"Aucun téléchargement trouvé pour {ref.book_id} dans {out_dir}. "
-            f"Lance d'abord : sdg fetch {ref.book_id}"
+            f"Lance d'abord : sdg fetch {ref.book_id}",
+            errors.SERIES_DIR_NOT_FOUND,
         )
     lang = lang or ref.lang
     if lang:
@@ -120,7 +128,9 @@ def find_series_dir(out_dir: Path, ref: BookRef, lang: str | None = None) -> Pat
     if len(candidates) == 1 and not lang:
         return candidates[0][0]
     names = ", ".join(f"{d.name} (langue {m.get('lang')})" for d, m in candidates)
-    raise FilmError(f"Précise la langue avec --lang ou donne le dossier directement. Trouvés : {names}")
+    raise FilmError(
+        f"Précise la langue avec --lang ou donne le dossier directement. Trouvés : {names}", errors.AMBIGUOUS_VERSION
+    )
 
 
 # --- planning -------------------------------------------------------------------
@@ -128,16 +138,18 @@ def find_series_dir(out_dir: Path, ref: BookRef, lang: str | None = None) -> Pat
 
 def plan_film(series_dir: Path, allow_missing: bool = False, only: set[int] | None = None) -> FilmPlan:
     """What would go into the film. ``only`` restricts it to some episode numbers."""
+    if not series_dir.is_dir():
+        raise FilmError(f"Dossier introuvable : {series_dir}", errors.SERIES_DIR_NOT_FOUND)
     manifest_path = series_dir / MANIFEST_FILENAME
     if manifest_path.exists():
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        data = read_json(manifest_path)
         title = data.get("title") or series_dir.name
         numbers = [e["number"] for e in data.get("episodes", [])]
     else:  # a folder of E001.mp4 files without manifest
         title = series_dir.name
         numbers = sorted(int(m.group(1)) for p in series_dir.iterdir() if (m := _EPISODE_FILE_RE.match(p.name)))
     if not numbers:
-        raise FilmError(f"Aucun épisode dans {series_dir}")
+        raise FilmError(f"Aucun épisode dans {series_dir}", errors.NO_EPISODES)
     total = len(numbers)
     if only is not None:
         numbers = [n for n in numbers if n in only]
@@ -145,7 +157,10 @@ def plan_film(series_dir: Path, allow_missing: bool = False, only: set[int] | No
     parts, missing = [], []
     for number in sorted(numbers):
         path = series_dir / f"E{number:03d}.mp4"
-        info = mp4.probe(path) if path.exists() else None
+        try:
+            info = mp4.probe(path) if path.exists() else None
+        except (OSError, IndexError, ValueError, struct.error):  # truncated or corrupt file
+            info = None
         if info is None or info.video is None:
             missing.append(number)
         else:
@@ -154,10 +169,11 @@ def plan_film(series_dir: Path, allow_missing: bool = False, only: set[int] | No
     if missing and not allow_missing:
         raise FilmError(
             f"Épisodes absents ou illisibles : {format_ranges(missing)}. Relance « sdg fetch » pour les "
-            "récupérer, ou utilise --allow-missing pour fusionner sans eux."
+            "récupérer, ou utilise --allow-missing pour fusionner sans eux.",
+            errors.FILM_MISSING_EPISODES,
         )
     if not parts:
-        raise FilmError(f"Aucun épisode lisible dans {series_dir}")
+        raise FilmError(f"Aucun épisode lisible dans {series_dir}", errors.NO_EPISODES)
     return FilmPlan(series_dir, title, total, parts, missing)
 
 
@@ -176,7 +192,8 @@ def ensure_joinable(plan: FilmPlan, reencode: bool) -> None:
         raise FilmError(
             "Les épisodes n'ont pas tous le même format, la fusion sans ré-encodage est "
             f"impossible ({describe_groups(plan)}). Retélécharge les épisodes à part dans la même "
-            "qualité, ou ajoute --reencode (plus lent)."
+            "qualité, ou ajoute --reencode (plus lent).",
+            errors.FILM_MIXED_FORMATS,
         )
 
 
@@ -189,6 +206,141 @@ def default_output(plan: FilmPlan) -> Path:
     return plan.series_dir / f"{name}.mp4"
 
 
+def make_film(
+    series_dir: Path,
+    ffmpeg: str,
+    log: Log = print,
+    output: Path | None = None,
+    reencode: bool = False,
+    allow_missing: bool = False,
+    chapters: bool = True,
+    only: set[int] | None = None,
+    replace: bool = False,
+    stop: threading.Event | None = None,
+    on_progress: Progress | None = None,
+) -> FilmResult:
+    """Plan, check and build the film of a downloaded series.
+
+    An existing film is never overwritten silently: if it is already up to date
+    (same episodes, none modified since) it is reused, otherwise FilmError
+    film_exists is raised unless ``replace`` is set.
+    """
+    plan = plan_film(series_dir, allow_missing, only)
+    ensure_joinable(plan, reencode)
+    if plan.missing:
+        log(f"Attention : épisodes absents, film incomplet (manquent : {format_ranges(plan.missing)})")
+    output = output or default_output(plan)
+    if output.exists() and not replace:
+        existing = up_to_date_film(plan, output)
+        if existing:
+            log(f"Film déjà à jour : {output} ({format_duration(existing.duration)}, {existing.size / 1e6:.0f} Mo)")
+            return existing
+        manifest = Manifest.load(plan.series_dir)
+        record = (manifest.data.get("film") if manifest else None) or {}
+        why = (
+            "Le film existant n'est plus à jour (épisodes modifiés ou différents)"
+            if record.get("file") in (output.name, str(output))
+            else "Un fichier porte déjà ce nom"
+        )
+        raise FilmError(
+            f"{why} : {output}. Ajoute --replace pour le remplacer, ou choisis un autre nom avec -f.",
+            errors.FILM_EXISTS,
+        )
+    how = "avec ré-encodage, c'est long" if reencode else "sans ré-encodage"
+    log(f"Fusion de {len(plan.parts)} épisodes ({format_duration(plan.length(reencode))}, {how}) -> {output}")
+    result = build_film(plan, output, ffmpeg, reencode, chapters, on_progress, stop)
+    log(f"Film créé : {result.path} ({format_duration(result.duration)}, {result.size / 1e6:.0f} Mo)")
+    return result
+
+
+def up_to_date_film(plan: FilmPlan, output: Path) -> FilmResult | None:
+    """The existing film, if the manifest says it holds exactly these episodes, unchanged since."""
+    manifest = Manifest.load(plan.series_dir)
+    record = (manifest.data.get("film") if manifest else None) or {}
+    name = output.name if output.parent == plan.series_dir else str(output)
+    if record.get("file") != name or record.get("episodes") != [p.number for p in plan.parts]:
+        return None
+    stat = output.stat()
+    if record.get("bytes") != stat.st_size or any(p.path.stat().st_mtime > stat.st_mtime for p in plan.parts):
+        return None
+    return FilmResult(
+        output, record.get("duration_s") or 0.0, stat.st_size, record.get("mode", "copy"),
+        record.get("chapters", 0), reused=True,
+    )  # fmt: skip
+
+
+def plan_summary(
+    series_dir: Path,
+    reencode: bool = False,
+    allow_missing: bool = False,
+    only: set[int] | None = None,
+    ffmpeg: str | None = None,
+    output: Path | None = None,
+) -> dict:
+    """Pre-flight report of a film, as data: what blocks it and how to fix it. Never raises for
+    a film problem (missing episodes, mixed formats…): that is what the report describes."""
+    try:
+        plan = plan_film(series_dir, allow_missing=True, only=only)
+    except FilmError as e:
+        return {"can_build": False, "error": {"code": e.code, "message": str(e)}, "checks": {}, "fixes": []}
+    main = plan.main_format()
+    main_quality = quality_label(main)
+    minority = sorted(p.number for p in plan.parts if p.info.format_key != main.format_key)
+    groups = [
+        {
+            "format": parts[0].info.describe(),
+            "quality": quality_label(parts[0].info),
+            "episodes": format_ranges([p.number for p in parts]),
+            "count": len(parts),
+        }
+        for parts in plan.groups.values()
+    ]
+    out = output or default_output(plan)
+    needed = sum(p.path.stat().st_size for p in plan.parts)
+    free = shutil.disk_usage(series_dir).free
+    tool = ffmpeg_info(ffmpeg)
+    checks = {
+        "episodes": {"ok": not plan.missing, "missing": plan.missing, "present": len(plan.parts)},
+        "format": {"ok": plan.compatible, "groups": groups},
+        "ffmpeg": {"ok": tool["found"], **tool},
+        "disk": {"ok": free > needed, "needed_bytes": needed, "free_bytes": free},
+        "output": {"name": out.name, "exists": out.exists()},
+        "chapters": len(plan.parts),
+    }
+    can_build = (
+        (checks["episodes"]["ok"] or allow_missing)
+        and (checks["format"]["ok"] or reencode)
+        and checks["ffmpeg"]["ok"]
+        and checks["disk"]["ok"]
+    )
+    fixes = []
+    if plan.missing or minority:
+        fixes.append({
+            "action": "repair_then_film", "download": plan.missing, "redownload": minority,
+            "quality": main_quality, "label": "Réparer puis créer le film",
+        })  # fmt: skip
+    if plan.missing:
+        fixes.append({"action": "allow_missing", "output_name": out.name, "label": "Créer un film partiel"})
+    if minority:
+        fixes.append({
+            "action": "reencode", "enabled": not plan.missing,
+            "reason": "Des épisodes manquent aussi" if plan.missing else None,
+            "label": "Créer quand même (ré-encodage, plusieurs minutes)",
+        })  # fmt: skip
+    return {
+        "can_build": can_build,
+        "checks": checks,
+        "fixes": fixes,
+        "duration_s": round(plan.length(reencode), 3),
+        "estimated_bytes": needed,
+    }
+
+
+def quality_label(info: mp4.Mp4Info) -> str:
+    """"1080p" for a 1080x1920 video (the short side, as the source names its qualities)."""
+    return f"{min(info.video.width, info.video.height)}p" if info.video else "?"
+
+
 def build_film(
     plan: FilmPlan,
     output: Path,
@@ -196,6 +348,7 @@ def build_film(
     reencode: bool = False,
     chapters: bool = True,
     on_progress: Progress | None = None,
+    stop: threading.Event | None = None,
 ) -> FilmResult:
     ensure_joinable(plan, reencode)
     mode = "reencode" if reencode else "copy"
@@ -214,7 +367,7 @@ def build_film(
             args = copy_args(ffmpeg, concat_list, metadata, tmp_output)
         expected = plan.length(reencode)
         try:
-            _run_ffmpeg(args, expected, tmp_dir / "ffmpeg.log", on_progress)
+            _run_ffmpeg(args, expected, tmp_dir / "ffmpeg.log", on_progress, stop)
         except BaseException:  # failure or Ctrl+C: no half-written film left behind
             tmp_output.unlink(missing_ok=True)
             raise
@@ -223,9 +376,11 @@ def build_film(
     tolerance = 1.0 + 0.05 * len(plan.parts)
     if duration is None or abs(duration - expected) > tolerance:
         tmp_output.unlink(missing_ok=True)
-        raise FilmError(f"Film incorrect : durée {duration or 0:.1f} s au lieu de {expected:.1f} s attendues")
+        raise FilmError(
+            f"Film incorrect : durée {duration or 0:.1f} s au lieu de {expected:.1f} s attendues", errors.FILM_DURATION
+        )
     os.replace(tmp_output, output)
-    result = FilmResult(output, duration, output.stat().st_size, mode)
+    result = FilmResult(output, duration, output.stat().st_size, mode, len(plan.parts) if chapters else 0)
     _record_in_manifest(plan, result)
     return result
 
@@ -328,40 +483,58 @@ def safe_filename(title: str) -> str:
     return name[:150] or "film"
 
 
-def find_ffmpeg(explicit: str | None = None) -> str:
-    """ffmpeg from --ffmpeg, the PATH, or the imageio-ffmpeg package."""
+FFMPEG_HELP = (
+    "ffmpeg est nécessaire pour la fusion. Au choix :\n"
+    "  - pip install imageio-ffmpeg   (le plus simple, fournit ffmpeg sans installation système)\n"
+    "  - Windows : winget install Gyan.FFmpeg   |   macOS : brew install ffmpeg   |   Linux : apt install ffmpeg\n"
+    "  - ou indique son chemin avec --ffmpeg"
+)
+
+
+def ffmpeg_info(explicit: str | None = None) -> dict:
+    """Where ffmpeg comes from: {"found", "path", "source": option | PATH | imageio-ffmpeg}."""
     if explicit:
         found = shutil.which(explicit) or (explicit if Path(explicit).is_file() else None)
-        if not found:
-            raise FilmError(f"ffmpeg introuvable à l'emplacement indiqué : {explicit}")
-        return found
+        return {"found": bool(found), "path": found, "source": "option"}
     found = shutil.which("ffmpeg")
     if found:
-        return found
+        return {"found": True, "path": found, "source": "PATH"}
     try:
         import imageio_ffmpeg  # optional: pip install imageio-ffmpeg
 
-        return imageio_ffmpeg.get_ffmpeg_exe()
+        return {"found": True, "path": imageio_ffmpeg.get_ffmpeg_exe(), "source": "imageio-ffmpeg"}
     except Exception:
-        pass
-    raise FilmError(
-        "ffmpeg est nécessaire pour la fusion. Au choix :\n"
-        "  - pip install imageio-ffmpeg   (le plus simple, fournit ffmpeg sans installation système)\n"
-        "  - Windows : winget install Gyan.FFmpeg   |   macOS : brew install ffmpeg   |   Linux : apt install ffmpeg\n"
-        "  - ou indique son chemin avec --ffmpeg"
-    )
+        return {"found": False, "path": None, "source": None}
 
 
-def _run_ffmpeg(args: list[str], total: float, log_path: Path, on_progress: Progress | None) -> None:
+def find_ffmpeg(explicit: str | None = None) -> str:
+    """ffmpeg from --ffmpeg, the PATH, or the imageio-ffmpeg package."""
+    info = ffmpeg_info(explicit)
+    if info["found"]:
+        return info["path"]
+    if explicit:
+        raise FilmError(f"ffmpeg introuvable à l'emplacement indiqué : {explicit}", errors.FFMPEG_MISSING)
+    raise FilmError(FFMPEG_HELP, errors.FFMPEG_MISSING)
+
+
+def _run_ffmpeg(
+    args: list[str],
+    total: float,
+    log_path: Path,
+    on_progress: Progress | None,
+    stop: threading.Event | None = None,
+) -> None:
     with log_path.open("w+", encoding="utf-8", errors="replace") as log:
         try:
             proc = subprocess.Popen(
                 args, stdout=subprocess.PIPE, stderr=log, text=True, encoding="utf-8", errors="replace"
             )
         except OSError as e:
-            raise FilmError(f"Impossible de lancer ffmpeg : {e}") from None
+            raise FilmError(f"Impossible de lancer ffmpeg : {e}", errors.FFMPEG_MISSING) from None
         try:
-            for line in proc.stdout:
+            for line in proc.stdout:  # -progress writes a block about twice per second
+                if stop is not None and stop.is_set():
+                    raise FilmError("Création du film annulée.", errors.CANCELLED)
                 key, _, value = line.strip().partition("=")
                 if on_progress and key in ("out_time_us", "out_time_ms") and value.isdigit():
                     on_progress(min(int(value) / 1e6, total), total)  # both are microseconds
@@ -373,7 +546,7 @@ def _run_ffmpeg(args: list[str], total: float, log_path: Path, on_progress: Prog
         if code != 0:
             log.seek(0)
             details = log.read().strip().splitlines()[-5:]
-            raise FilmError("ffmpeg a échoué :\n  " + "\n  ".join(details or [f"code {code}"]))
+            raise FilmError("ffmpeg a échoué :\n  " + "\n  ".join(details or [f"code {code}"]), errors.FILM_FAILED)
 
 
 def _record_in_manifest(plan: FilmPlan, result: FilmResult) -> None:
@@ -389,9 +562,17 @@ def _record_in_manifest(plan: FilmPlan, result: FilmResult) -> None:
             "duration_s": round(result.duration, 3),
             "bytes": result.size,
             "mode": result.mode,
-            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "chapters": result.chapters,
+            "created_at": now_iso(),
         },
     )
+
+
+def format_duration(seconds: float) -> str:
+    """5538.6 -> "1 h 32 min 19 s", 79.1 -> "1 min 19 s"."""
+    seconds = round(seconds)
+    h, m, s = seconds // 3600, seconds % 3600 // 60, seconds % 60
+    return f"{h} h {m:02d} min {s:02d} s" if h else f"{m} min {s:02d} s"
 
 
 def format_ranges(numbers: list[int]) -> str:

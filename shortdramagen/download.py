@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
-from . import mp4
+from . import errors, mp4
 from .http import Http, HttpStatusError
 
 CHUNK_SIZE = 256 * 1024
@@ -20,9 +20,13 @@ _CONTENT_RANGE_RE = re.compile(r"bytes\s+(\d+)-\d+/(\d+)")
 class UrlRejected(Exception):
     """The CDN refused the URL (expired or invalid signature): resolve it again."""
 
+    code = errors.URL_REJECTED
+
 
 class IntegrityError(Exception):
-    pass
+    def __init__(self, message: str, code: str = errors.SIZE_MISMATCH):
+        super().__init__(message)
+        self.code = code
 
 
 def download(
@@ -83,14 +87,15 @@ def check_duration(path: Path, expected_duration_ms: int | None) -> None:
         seconds = mp4.duration_seconds(path)
     except (OSError, IndexError, struct.error) as e:  # truncated or corrupt file
         path.unlink(missing_ok=True)
-        raise IntegrityError(f"MP4 illisible : {e}") from None
+        raise IntegrityError(f"MP4 illisible : {e}", errors.MP4_UNREADABLE) from None
     if seconds is None:
         path.unlink(missing_ok=True)
-        raise IntegrityError("MP4 illisible (pas de boîte moov/mvhd)")
+        raise IntegrityError("MP4 illisible (pas de boîte moov/mvhd)", errors.MP4_UNREADABLE)
     if expected_duration_ms and abs(seconds - expected_duration_ms / 1000) > DURATION_TOLERANCE_S:
         path.unlink(missing_ok=True)
         raise IntegrityError(
-            f"durée {seconds:.1f} s au lieu de {expected_duration_ms / 1000:.1f} s (mauvais fichier ?)"
+            f"durée {seconds:.1f} s au lieu de {expected_duration_ms / 1000:.1f} s (mauvais fichier ?)",
+            errors.DURATION_MISMATCH,
         )
 
 

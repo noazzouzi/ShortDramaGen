@@ -116,19 +116,55 @@ Contrat d'API complet (routes, charges utiles, événements SSE) : [spec-v1.md �
 
 | Étape | Contenu | Estimation |
 |---|---|---|
-| **0. Moteur pilotable** | Annulation injectable, événements de progression (octets, épisodes), codes d'erreur stables, option `force`, aperçu sans téléchargement, `make_film` réutilisable. La CLI reste identique et les tests existants passent. | 1,5 j |
+| **0. Moteur pilotable** ✅ fait | Annulation injectable, événements de progression (octets, épisodes), codes d'erreur stables, option `force`, aperçu sans téléchargement, `make_film` réutilisable. La CLI garde ses commandes et les tests existants passent. | 1,5 j |
 | **1. Serveur en lecture seule** | `sdg ui`, bibliothèque, fiches, lecture des médias | 1,5 j |
 | **2. Jobs et temps réel** | File, SSE, pause, reprise, réparation, film, corbeille, réglages | 2 j |
 | **3. Client MVP** | Tous les écrans de la maquette | 4 à 5 j |
 | V1.1 | Catalogue des langues, « Continuer à regarder », nouveaux épisodes, notifications Windows, zip portable | 2 j |
 | V2 | Accès depuis le téléphone (réseau local authentifié), `.exe`, 2 séries en parallèle | — |
 
-La recherche sur le code a trouvé des écarts à corriger à l'étape 0 :
-- après un Ctrl+C, des épisodes restent en `downloading` dans le manifest ;
-- `fetch --film` ne transmet ni `reencode` ni `allow_missing` ;
-- un film existant est écrasé sans confirmation.
+### Étape 0 : livrée
 
-Détails : [brainstorm/1-recherche-capacites-du-moteur.md](frontend/brainstorm/1-recherche-capacites-du-moteur.md).
+Le moteur se pilote désormais sans la CLI. Description complète :
+[architecture §3.10](02-architecture.md#310-moteur-pilotable--fetchcontrol-événements-codes-derreur).
+
+- `FetchControl` : arrêt propre (`stop`), limiteur partagé, `force`,
+  `strict_quality`, événements `on_event` et écouteur du manifest.
+- 18 événements, de `series_loaded` à `fetch_finished`, dont
+  `episode_progress` (octets), `quality_fallback` et `disk_full`.
+- Codes d'erreur stables (`errors.py`) dans le manifest et les résultats.
+- Manifest v2 : titre VO, langues, affiche locale, demande d'origine, et par
+  épisode code d'erreur, tentatives et heure de fin.
+- `preview_series()` (aperçu sans écriture ni sonde), `cover.jpg`
+  téléchargée à côté des épisodes.
+- `film.make_film()` et `film.plan_summary()` (contrôles et correctifs
+  proposés), avec des codes d'erreur et l'annulation de ffmpeg.
+
+Les trois écarts trouvés par la recherche sur le code sont corrigés :
+- **Ctrl+C** : les épisodes en cours repassent en `pending` (plus aucun
+  `downloading` orphelin), et un manifest laissé dans cet état par une
+  ancienne version est réparé à l'ouverture ;
+- **`fetch --film`** accepte `--reencode`, `--allow-missing`, `--no-chapters`
+  et `--replace`, et ne crée pas de film si des épisodes ont échoué (sauf
+  avec `--allow-missing`) ;
+- **film existant** : jamais écrasé en silence. Il est réutilisé s'il est à
+  jour, sinon la commande refuse et propose `--replace` ou `-f`.
+
+Vérifié sur le réseau réel : arrêt pendant un téléchargement puis reprise,
+repli de langue (`--lang de` → VO), film de 6 épisodes créé, réutilisé,
+refusé après modification d'un épisode, puis reconstruit avec `--replace`.
+Tests : 70, hors ligne (4 utilisent ffmpeg et sont ignorés s'il est absent).
+
+Écarts assumés par rapport à la [spec §12](frontend/spec-v1.md#12-plan-dimplémentation-et-changements-python) :
+- un seul `on_event(nom, données)` au lieu de cinq callbacks, plus simple à
+  relayer en SSE ;
+- `title_vo` au lieu d'un dictionnaire `titles` (le catalogue des langues
+  arrive en V1.1) ;
+- le statut `removed` arrivera avec la corbeille, à l'étape 2 ;
+- la CLI protège le film existant (`--replace`) au lieu de garder l'ancien
+  écrasement silencieux.
+
+Détails de la recherche : [brainstorm/1-recherche-capacites-du-moteur.md](frontend/brainstorm/1-recherche-capacites-du-moteur.md).
 
 ## 10. Questions ouvertes
 

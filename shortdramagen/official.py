@@ -7,13 +7,21 @@ URLs for the free episodes. See docs/01-etude-technique.md §5.
 from __future__ import annotations
 
 import json
+import os
 import re
+from pathlib import Path
 
 from . import cdn
 from .http import Http, HttpStatusError
 from .models import Episode, Series
 
 BASE_URL = "https://www.dramaboxdb.com"
+# bookInfo.language -> locale code, as used in the site's URLs and "languages" list.
+_LANGUAGE_CODES = {
+    "ENGLISH": "en", "FRENCH": "fr", "SPANISH": "es", "KOREAN": "ko", "JAPANESE": "ja", "THAI": "th",
+    "INDONESIAN": "in", "PORTUGUESE": "pt", "GERMAN": "de", "ITALIAN": "it", "ARABIC": "ar",
+    "VIETNAMESE": "vi", "CHINESE": "zh", "TRADITIONAL_CHINESE": "zh", "SIMPLIFIED_CHINESE": "zhHans",
+}  # fmt: skip
 _NEXT_DATA_RE = re.compile(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S)
 
 
@@ -72,17 +80,37 @@ def parse_page_props(props: dict, book_id: str, lang: str | None = None) -> Seri
             )
         )
 
+    title = info.get("bookName") or book_id
     return Series(
         book_id=str(info.get("bookId") or book_id),
         source_book_id=source_book_id,
-        lang=props.get("locale") or lang or "en",
-        title=info.get("bookName") or book_id,
+        # The language of the videos. A locale without dub serves the original
+        # version, whose bookInfo.language tells the real language.
+        lang=_LANGUAGE_CODES.get(str(info.get("language") or "").upper()) or props.get("locale") or lang or "en",
+        title=title,
         slug=info.get("bookNameLower") or _slugify(info.get("bookNameEn") or book_id),
         episodes=episodes,
         languages=languages,
         cover=info.get("cover"),
         introduction=info.get("introduction") or "",
+        title_vo=_title_from_slug(info.get("bookNameEn")) or title,
     )
+
+
+def download_cover(http: Http, url: str, dest: Path) -> int:
+    """Save the series cover (JPEG, 3:4) next to the episodes; returns its size."""
+    resp = http.get(url)
+    if not resp.body.startswith(b"\xff\xd8"):
+        raise ValueError("la cover reçue n'est pas une image JPEG")
+    tmp = dest.with_name(dest.name + ".part")
+    tmp.write_bytes(resp.body)
+    os.replace(tmp, dest)
+    return len(resp.body)
+
+
+def _title_from_slug(slug: str | None) -> str | None:
+    """"One-Night-to-Forever" -> "One Night to Forever" (the site gives the VO title as a slug)."""
+    return re.sub(r"-+", " ", slug).strip() or None if slug else None
 
 
 def _slugify(text: str) -> str:

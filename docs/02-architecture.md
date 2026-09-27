@@ -42,6 +42,12 @@ officielle (série ou épisode, avec ou sans locale), `dramabox.com/drama/…`,
 lien de partage `dramaboxapp.com`, URL dramafren (le `lang` y est ignoré, car
 il ne change pas la vidéo), paramètre `bookId=` ou identifiant brut. Seule la
 locale d'une URL officielle (`/fr/movie/…`) est retenue comme langue.
+`BookRef.episode` garde l'épisode visé par un lien d'épisode (`/ep/…_Episode-28`
+ou `ep=28` chez dramafren), pour que l'interface puisse le mettre en avant.
+
+`parse_episodes("1-10, 28, 50-")` → `[(1, 10), (28, 28), (50, None)]` vit
+aussi ici (et plus dans la CLI) : espaces, tirets typographiques et signe
+moins sont tolérés, une plage invalide lève `InputError`.
 
 ### 3.2 `official.py`
 1. `GET https://www.dramaboxdb.com/{locale}/movie/{bookId}/` (redirige vers le
@@ -49,13 +55,17 @@ locale d'une URL officielle (`/fr/movie/…`) est retenue comme langue.
 2. Parse de `__NEXT_DATA__` → `pageProps` (le HTML est plus stable que
    `/_next/data/{buildId}/…`, dont le `buildId` change à chaque déploiement).
 3. `Series` :
-   - titre ;
+   - titre, et titre VO (`title_vo`, tiré de `bookNameEn`) ;
    - `source_book_id` (livre de la langue choisie) ;
-   - langues disponibles ;
+   - langues disponibles, et langue réelle de la version obtenue (lue dans
+     `bookInfo.language` : une page `/de/` d'une série sans doublage allemand
+     renvoie la VO, étiquetée `en` et non `de`) ;
    - pour chaque `Episode` : `chapter_id` (ID d'origine), `media_id` (ID
      réellement présent dans les chemins CDN, lu dans l'URL de la cover),
      `duration_ms`, `free_url`.
-4. `404` ou page sans `bookInfo` → `SeriesNotFound`. Le pipeline bascule alors
+4. `download_cover(url, dest)` enregistre l'affiche (JPEG 540×720, contrôlé
+   par sa signature) en `cover.jpg` à côté des épisodes.
+5. `404` ou page sans `bookInfo` → `SeriesNotFound`. Le pipeline bascule alors
    en **mode sonde** : il interroge dramafren épisode par épisode jusqu'au
    premier `ok: false`, sans contrôle de durée.
 
@@ -102,8 +112,11 @@ sinon, jusqu'à 3 tentatives :
         téléchargement → OK : status=done, fin
         URL refusée / fichier incorrect → source suivante
         erreur réseau → pause (2 s, 4 s) puis nouvelle résolution
-→ status=failed + message, sans bloquer les autres épisodes
+→ status=failed + message + error_code, sans bloquer les autres épisodes
 ```
+
+Le pipeline se pilote de l'extérieur (arrêt, événements, options) : voir
+[§3.10](#310-moteur-pilotable--fetchcontrol-événements-codes-derreur).
 
 ### 3.7 `manifest.py`
 `downloads/{bookId}-{slug}[-{lang}]/manifest.json`, réécrit atomiquement à
@@ -111,28 +124,63 @@ chaque changement d'état :
 
 ```jsonc
 {
+  "schema_version": 2,
   "platform": "dramabox", "book_id": "41000105199", "source_book_id": "41000111625",
-  "lang": "fr", "title": "Qui Est la Véritable Mme Lafont ?", "episode_count": 62,
+  "lang": "fr", "title": "Qui Est la Véritable Mme Lafont ?", "title_vo": "One Night to Forever",
+  "languages": ["en", "fr", "es"], "from_official": true,
+  "episode_count": 62, "total_duration_ms": 5520000,
+  "cover_file": "cover.jpg",
+  "created_at": "2026-09-27T08:12:03+00:00", "updated_at": "2026-09-27T08:19:40+00:00",
+  "requested": { "lang": "fr", "quality": "best", "episodes": null, "at": "2026-09-27T08:12:03+00:00" },
   "episodes": [
     { "number": 28, "chapter_id": "577159363", "media_id": "586357960", "duration_ms": 79134,
       "status": "done", "quality": "1080p", "origin": "dramafren",
       "url": "https://hwztakavideoto…", "url_expires_at": "2026-10-19T06:27:45+00:00",
-      "file": "E028.mp4", "bytes": 10149996 }
-  ]
+      "file": "E028.mp4", "bytes": 10149996, "attempts": 1, "finished_at": "2026-09-27T08:14:51+00:00" },
+    { "number": 40, "status": "failed", "error_code": "ep_unavailable",
+      "error": "Épisode 40 indisponible sur dramafren (…)", "attempts": 1 }
+  ],
+  "film": { "file": "Qui Est la Véritable Mme Lafont.mp4", "episodes": [1, 2, "…"], "missing": [],
+            "mode": "copy", "duration_s": 5520.4, "bytes": 717000000, "chapters": 62,
+            "created_at": "2026-09-27T08:20:02+00:00" }
 }
 ```
 
 Le traitement est idempotent : relancer la même commande ne fait que ce qui
 manque, ou ce qui a échoué.
 
+Version 2 du schéma (étape 0 du frontend) :
+- **champs ajoutés** : `title_vo`, `languages`, `from_official`,
+  `total_duration_ms`, `cover_file`, `created_at`, `requested` ; par épisode
+  `error_code`, `attempts`, `finished_at`, et `quality_requested` quand la
+  qualité obtenue n'est pas celle demandée ;
+- **cohérence** : repasser en `downloading`, `pending` ou `done` efface
+  l'ancienne erreur ; à l'ouverture, un épisode resté en `downloading`
+  (arrêt brutal) repasse en `pending` ;
+- **manifest illisible** : mis de côté en `manifest.corrupt-<date>.json` puis
+  reconstruit (les fichiers présents sont retrouvés par leur vérification) ;
+  en lecture seule, `ManifestError` donne un message clair au lieu d'une trace ;
+- **écouteur** : `Manifest(listener=…)` est appelé après chaque sauvegarde
+  avec le numéro d'épisode modifié (ou `None`), hors du verrou. C'est ce que
+  le serveur relaiera en SSE ;
+- les manifests v1 restent lisibles et passent en v2 au prochain `fetch`.
+
 ### 3.8 `cli.py`
 
 ```bash
-sdg info  <url> [--lang fr]
-sdg fetch <url> [--lang fr] [-q best|1080p|720p|540p] [-e 1-10,28,40-] [-o downloads] [-j 3] [--film]
+sdg info  <url> [--lang fr]                              # aperçu : aucune écriture, aucune sonde
+sdg fetch <url> [--lang fr] [-q best|1080p|720p|540p] [-e 1-10,28,40-] [-o downloads] [-j 3]
+                [--film [--reencode] [--allow-missing] [--no-chapters] [--replace] [--ffmpeg PATH]]
 sdg links <url> [--lang fr] [-q ...] [-e ...] [--json]   # URLs pour aria2c / IDM
-sdg film  <dossier|url|id> [--lang fr] [-f film.mp4] [--reencode] [--allow-missing] [--no-chapters] [--ffmpeg PATH]
+sdg film  <dossier|url|id> [--lang fr] [-f film.mp4] [--reencode] [--allow-missing] [--no-chapters] [--replace] [--ffmpeg PATH]
 ```
+
+La CLI n'est qu'un client du moteur : `info` appelle `preview_series`, `fetch`
+appelle `pipeline.fetch`, `film` et `fetch --film` appellent `film.make_film`.
+Avec `fetch --film`, le film n'est pas créé si des épisodes ont échoué, sauf
+avec `--allow-missing` ; il n'est pas créé non plus après un arrêt pour disque
+plein. Les erreurs réseau, disque ou de manifest s'affichent en une ligne
+lisible (code de sortie 1), sans trace Python.
 
 ### 3.9 `film.py` : fusion en un seul film
 
@@ -161,7 +209,32 @@ téléchargement, pour échouer tout de suite s'il manque.
 5. **Chapitres** : fichier FFMETADATA, un chapitre « Épisode N » par épisode.
 6. **Contrôle** : durée du film = somme attendue (tolérance 1 s + 0,05 s par
    épisode), puis renommage atomique `.part` → `Titre.mp4`, et entrée `film`
-   dans le manifest.
+   dans le manifest (fichier, épisodes, mode, durée, taille, chapitres).
+
+**Film existant.** `make_film(replace=False)` n'écrase jamais un fichier en
+silence :
+- si le manifest indique que ce film contient exactement les mêmes épisodes,
+  que sa taille n'a pas changé et qu'aucun épisode n'est plus récent que lui,
+  il est **réutilisé** (« Film déjà à jour », sans lancer ffmpeg) ;
+- sinon : `FilmError` `film_exists`, avec un message qui distingue un film
+  périmé d'un autre fichier du même nom. `--replace` le reconstruit.
+
+**API pour l'interface.**
+- `make_film(series_dir, ffmpeg, log, output, reencode, allow_missing,
+  chapters, only, replace, stop, on_progress)` : le même chemin que la CLI.
+  `stop` interrompt ffmpeg proprement (`cancelled`) ;
+- `plan_summary(series_dir, reencode, allow_missing, only, ffmpeg, output)` :
+  le « pré-vol » du film, en données, sans jamais lever pour un problème de
+  film. Il renvoie `can_build`, les contrôles (`episodes`, `format` avec les
+  groupes et leur qualité, `ffmpeg`, `disk`, `output`, `chapters`) et les
+  **correctifs** proposés : `repair_then_film` (épisodes à télécharger ou à
+  retélécharger dans la qualité majoritaire), `allow_missing` (avec le nom du
+  film partiel), `reencode` (désactivé s'il manque aussi des épisodes) ;
+- `ffmpeg_info()` → `{found, path, source}` pour l'écran des réglages ;
+- toutes les erreurs portent un `code` : `ffmpeg_missing`, `not_found`,
+  `ambiguous_version`, `no_episodes`, `film_missing_episodes`,
+  `film_mixed_formats`, `film_exists`, `film_duration`, `film_failed`,
+  `cancelled`.
 
 **Piège évité : les edit lists.** Chaque épisode DramaBox contient des
 paquets audio de *priming* AAC (~0,115 s) placés avant la vidéo, et masqués
@@ -194,6 +267,93 @@ chapitres utilisent la durée de présentation (lue dans `elst` par `mp4.probe`)
 Codes de sortie : `0` = tout OK, `1` = au moins un échec (relancer pour
 réessayer), `2` = entrée invalide, `130` = interrompu (Ctrl+C, reprise
 possible).
+
+### 3.10 Moteur pilotable : `FetchControl`, événements, codes d'erreur
+
+Ajouté à l'étape 0 du frontend : le serveur `sdg ui` pilotera le même moteur
+que la CLI, sans le modifier. `fetch(http, ref, opts, log, control=None)`
+garde sa signature ; sans `control`, le comportement est celui de la CLI.
+
+```python
+control = FetchControl(
+    stop=threading.Event(),      # set() : arrêt propre
+    limiter=RateLimiter(0.3),    # partagé entre plusieurs séries (API dramafren)
+    force=frozenset({12, 41}),   # retélécharger même si le fichier est valide
+    strict_quality=False,        # True : jamais d'autre qualité (quality_unavailable)
+    on_event=handler,            # handler(nom, dict), appelé depuis les threads
+    manifest_listener=listener,  # listener(manifest, numéro | None)
+)
+result = pipeline.fetch(http, ref, opts, control=control)
+```
+
+**Arrêt.**
+- `stop` est vérifié entre deux blocs de 256 Kio, pendant l'attente du
+  limiteur et pendant les pauses entre tentatives (`stop.wait` au lieu de
+  `time.sleep`). Un arrêt prend donc effet en moins d'une seconde.
+- Un épisode interrompu repasse en `pending` et garde son `.part` : le
+  prochain `fetch` reprend là où il en était. `result.cancelled` vaut `True`.
+- Ctrl+C dans la CLI passe par le même chemin (plus aucun épisode laissé en
+  `downloading`), puis relève `KeyboardInterrupt` (code 130).
+- **Disque plein** (`ENOSPC`) : le moteur s'arrête de lui-même
+  (`result.stop_reason = "disk_full"`), l'épisode reste en `pending` au lieu
+  d'être compté comme un échec.
+- La sonde (série absente du site officiel) est interruptible elle aussi.
+
+**`force`** contourne le « déjà présent ». L'ancien fichier n'est remplacé
+qu'une fois le nouveau vérifié (renommage atomique du `.part`). Si toutes les
+tentatives échouent, l'épisode passe en `failed` mais l'ancien fichier reste
+sur le disque ; le `fetch` suivant, sans `force`, le retrouve en `done`.
+
+**Qualité.** Sans `strict_quality`, la meilleure qualité disponible remplace
+celle qui manque ; l'épisode garde `quality_requested` et l'événement
+`quality_fallback` est émis. Avec `strict_quality`, l'épisode échoue en
+`quality_unavailable` en listant les qualités proposées.
+
+**Événements** (`on_event(nom, données)`, à rendre thread-safe côté appelant) :
+
+| Événement | Données |
+|---|---|
+| `probe_started`, `probe_progress` | `book_id` ; `found` (dernier épisode trouvé) |
+| `lang_fallback` | `requested`, `used`, `available` |
+| `selection_clipped` | `episode_count`, `ignored` (plages au-delà du dernier épisode) |
+| `series_loaded` | `book_id`, `source_book_id`, `lang`, `title`, `title_vo`, `from_official`, `episode_count`, `selected`, `series_key`, `series_dir` |
+| `cover_failed` | `message` (l'affiche est facultative) |
+| `episode_skipped` | `n`, `bytes` |
+| `episode_resolving`, `episode_started` | `n`, `attempt` ; + `quality`, `origin` |
+| `episode_progress` | `n`, `bytes`, `total` (au plus 4 par seconde et par épisode) |
+| `episode_source_rejected` | `n`, `quality`, `origin`, `code`, `message` (source suivante essayée) |
+| `quality_fallback` | `n`, `requested`, `got` |
+| `episode_done` | `n`, `bytes`, `quality`, `origin` |
+| `episode_retry` | `n`, `attempt`, `delay`, `code`, `message` |
+| `episode_failed` | `n`, `code`, `message` |
+| `episode_cancelled` | `n` |
+| `disk_full` | `n`, `message` |
+| `fetch_finished` | `done`, `skipped`, `failed` (`{n: code}`), `cancelled`, `stop_reason` |
+
+**Codes d'erreur stables** (`errors.py`), enregistrés en `error_code` dans le
+manifest et dans `result.failed_codes` :
+
+| Code | Sens |
+|---|---|
+| `ep_unavailable` | dramafren a répondu que l'épisode n'est pas disponible |
+| `network` | aucune réponse exploitable (réseau, 5xx, réponse invalide) |
+| `url_mismatch` | toutes les URL reçues pointaient vers un autre épisode |
+| `url_rejected` | le CDN a refusé l'URL (401/403/404/410) |
+| `size_mismatch`, `mp4_unreadable`, `duration_mismatch` | fichier reçu incomplet, illisible ou d'une autre durée |
+| `quality_unavailable` | qualité stricte absente |
+| `disk_full`, `file_locked` | disque plein ; fichier verrouillé (antivirus, lecteur ouvert…) |
+| `unknown` | tout le reste |
+
+`errors.code_for(exc)` prend le `code` porté par l'exception, sinon le déduit
+du type (`ENOSPC`, `PermissionError`, erreurs réseau).
+
+**Aperçu.** `preview_series(http, ref, lang, control)` → `Preview` : les
+métadonnées officielles plus un seul appel `get_video` sur le dernier épisode
+(disponibilité et qualités). Il n'écrit rien et ne lance jamais la sonde : une
+série absente du site officiel lève `SeriesNotFound`, et c'est l'appelant qui
+décide de sonder. `Preview.to_dict()` donne la charge utile prévue par l'API
+(durée totale, épisodes gratuits, épisode visé par le lien, estimation de
+taille en 1080p, seule qualité mesurée).
 
 ## 4. Séquence d'un `sdg fetch`
 
@@ -239,9 +399,10 @@ venait à protéger son API (voir [03](03-brainstorm-et-roadmap.md)).
 ```
 shortdramagen/
 ├── __main__.py      # python -m shortdramagen
-├── cli.py           # sous-commandes info / fetch / links
+├── cli.py           # sous-commandes info / fetch / links / film
 ├── models.py        # BookRef, Series, Episode, VideoSource
-├── inputs.py        # URL -> BookRef
+├── inputs.py        # URL -> BookRef, plages d'épisodes
+├── errors.py        # codes d'erreur stables
 ├── official.py      # métadonnées dramaboxdb.com
 ├── dramafren.py     # API get_video
 ├── cdn.py           # formule de chemin, expiration
@@ -250,7 +411,7 @@ shortdramagen/
 ├── mp4.py           # durée, codecs, edit lists d'un MP4 (sans ffmpeg)
 ├── film.py          # fusion en un seul film (ffmpeg) + chapitres
 ├── manifest.py      # état par série
-└── pipeline.py      # orchestration
+└── pipeline.py      # orchestration, FetchControl, aperçu
 tests/
 ├── fakes.py         # FakeHttp, générateur de MP4 (pistes, avcC, esds, edit lists)
 ├── fixtures/        # extraits réels anonymisés (site officiel EN/FR, réponse get_video)
