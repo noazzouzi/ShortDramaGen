@@ -119,6 +119,17 @@ def download_cover(http: Http, url: str, dest: Path) -> int:
     return len(resp.body)
 
 
+def download_subtitles(http: Http, url: str, dest: Path) -> int:
+    """Save a WebVTT file next to its episode; returns its size."""
+    resp = http.get(url)
+    if not resp.body.lstrip(b"\xef\xbb\xbf").startswith(b"WEBVTT"):
+        raise IntegrityError("les sous-titres reçus ne sont pas un fichier WebVTT", errors.SUBTITLES_UNREADABLE)
+    tmp = dest.with_name(dest.name + ".part")
+    tmp.write_bytes(resp.body)
+    fsutil.replace(tmp, dest)
+    return len(resp.body)
+
+
 def _total_size(status: int, headers, offset: int) -> int:
     lowered = {k.lower(): v for k, v in headers.items()}
     if status == 206:

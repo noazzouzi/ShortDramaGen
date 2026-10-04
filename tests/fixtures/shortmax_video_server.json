@@ -1,0 +1,54 @@
+{
+ "ok": true,
+ "server": {
+  "key": "server1",
+  "label": "Server 1",
+  "description": "Primary",
+  "available": true,
+  "loading": false,
+  "stale": false,
+  "cachedAt": 1790526709,
+  "playUrl": "https://akamai-static.shorttv.live/hls/681c719b-102a-49cd-b2e5-d05ec2a2d4e5_720/main.m3u8?auth_key=1785620277-0-0-00000000000000000000000000000000",
+  "proxyUrl": "https://cdn-shortmaxv2.dramafren.org/index.php?action=proxy_video&url=https%3A%2F%2Fakamai-static.shorttv.live%2Fhls%2F681c719b-102a-49cd-b2e5-d05ec2a2d4e5_720%2Fmain.m3u8%3Fauth_key%3D1785620277-0-0-00000000000000000000000000000000",
+  "fallbackUrl": "",
+  "qualities": [
+   {
+    "quality": "720p",
+    "url": "https://akamai-static.shorttv.live/hls/681c719b-102a-49cd-b2e5-d05ec2a2d4e5_720/main.m3u8?auth_key=1785620277-0-0-00000000000000000000000000000000",
+    "replacedUrl": "https://akamai-static.shorttv.live/hls/681c719b-102a-49cd-b2e5-d05ec2a2d4e5_720/main.m3u8?auth_key=1785620277-0-0-00000000000000000000000000000000",
+    "playUrl": "https://akamai-static.shorttv.live/hls/681c719b-102a-49cd-b2e5-d05ec2a2d4e5_720/main.m3u8?auth_key=1785620277-0-0-00000000000000000000000000000000",
+    "fallbackUrl": "",
+    "proxyUrl": "https://cdn-shortmaxv2.dramafren.org/index.php?action=proxy_video&url=https%3A%2F%2Fakamai-static.shorttv.live%2Fhls%2F681c719b-102a-49cd-b2e5-d05ec2a2d4e5_720%2Fmain.m3u8%3Fauth_key%3D1785620277-0-0-00000000000000000000000000000000",
+    "proxyPlayUrl": "https://cdn-shortmaxv2.dramafren.org/index.php?action=proxy_video&url=https%3A%2F%2Fakamai-static.shorttv.live%2Fhls%2F681c719b-102a-49cd-b2e5-d05ec2a2d4e5_720%2Fmain.m3u8%3Fauth_key%3D1785620277-0-0-00000000000000000000000000000000",
+    "isReplaced": false
+   },
+   {
+    "quality": "1080p",
+    "url": "https://akamai-static.shorttv.live/hls/681c719b-102a-49cd-b2e5-d05ec2a2d4e5_1080/main.m3u8?auth_key=1785620277-0-0-00000000000000000000000000000000",
+    "replacedUrl": "https://akamai-static.shorttv.live/hls/681c719b-102a-49cd-b2e5-d05ec2a2d4e5_1080/main.m3u8?auth_key=1785620277-0-0-00000000000000000000000000000000",
+    "playUrl": "https://akamai-static.shorttv.live/hls/681c719b-102a-49cd-b2e5-d05ec2a2d4e5_1080/main.m3u8?auth_key=1785620277-0-0-00000000000000000000000000000000",
+    "fallbackUrl": "",
+    "proxyUrl": "https://cdn-shortmaxv2.dramafren.org/index.php?action=proxy_video&url=https%3A%2F%2Fakamai-static.shorttv.live%2Fhls%2F681c719b-102a-49cd-b2e5-d05ec2a2d4e5_1080%2Fmain.m3u8%3Fauth_key%3D1785620277-0-0-00000000000000000000000000000000",
+    "proxyPlayUrl": "https://cdn-shortmaxv2.dramafren.org/index.php?action=proxy_video&url=https%3A%2F%2Fakamai-static.shorttv.live%2Fhls%2F681c719b-102a-49cd-b2e5-d05ec2a2d4e5_1080%2Fmain.m3u8%3Fauth_key%3D1785620277-0-0-00000000000000000000000000000000",
+    "isReplaced": false
+   },
+   {
+    "quality": "480p",
+    "url": "https://akamai-static.shorttv.live/hls/681c719b-102a-49cd-b2e5-d05ec2a2d4e5_480/main.m3u8?auth_key=1785620277-0-0-00000000000000000000000000000000",
+    "replacedUrl": "https://akamai-static.shorttv.live/hls/681c719b-102a-49cd-b2e5-d05ec2a2d4e5_480/main.m3u8?auth_key=1785620277-0-0-00000000000000000000000000000000",
+    "playUrl": "https://akamai-static.shorttv.live/hls/681c719b-102a-49cd-b2e5-d05ec2a2d4e5_480/main.m3u8?auth_key=1785620277-0-0-00000000000000000000000000000000",
+    "fallbackUrl": "",
+    "proxyUrl": "https://cdn-shortmaxv2.dramafren.org/index.php?action=proxy_video&url=https%3A%2F%2Fakamai-static.shorttv.live%2Fhls%2F681c719b-102a-49cd-b2e5-d05ec2a2d4e5_480%2Fmain.m3u8%3Fauth_key%3D1785620277-0-0-00000000000000000000000000000000",
+    "proxyPlayUrl": "https://cdn-shortmaxv2.dramafren.org/index.php?action=proxy_video&url=https%3A%2F%2Fakamai-static.shorttv.live%2Fhls%2F681c719b-102a-49cd-b2e5-d05ec2a2d4e5_480%2Fmain.m3u8%3Fauth_key%3D1785620277-0-0-00000000000000000000000000000000",
+    "isReplaced": false
+   }
+  ],
+  "sourceCacheTtl": 86400,
+  "sourceCacheAge": 66,
+  "sourceCacheRemaining": 86334,
+  "sourceCacheExpiresAt": 1790613043,
+  "cacheTtl": 86400,
+  "cacheAge": 0,
+  "cacheRemaining": 86334
+ }
+}

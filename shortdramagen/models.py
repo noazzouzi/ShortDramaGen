@@ -44,6 +44,7 @@ class Episode:
     media_id: str  # id used in CDN paths; differs from chapter_id for dubbed versions
     duration_ms: int | None = None
     free_url: str | None = None  # official video, only for the free episodes
+    free: bool = False  # free on the official site, its video read when downloading (NetShort)
 
 
 @dataclass
@@ -79,7 +80,7 @@ class Series:
 
     @property
     def free_numbers(self) -> list[int]:
-        return [ep.number for ep in self.episodes if ep.free_url]
+        return [ep.number for ep in self.episodes if ep.free_url or ep.free]
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ class VideoSource:
     quality: str  # "1080p", "720p", ... or "" when unknown
     origin: str  # "official", "dramafren"…
     kind: str = "mp4"  # "mp4": one file; "hls": an m3u8 playlist of segments
+    subtitles: str | None = None  # WebVTT file in the series' language, for a video without burned-in subtitles
 
     @property
     def height(self) -> int:

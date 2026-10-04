@@ -626,15 +626,20 @@ shortdramagen/
 │   ├── base.py      #   interface Provider
 │   ├── registry.py  #   plateformes connues, analyse des liens
 │   ├── dramabox.py  #   DramaBox (official + dramafren + cdn)
-│   └── goodshort.py #   GoodShort (site officiel, épisodes gratuits en HLS)
+│   ├── goodshort.py #   GoodShort (site officiel + dramafren, HLS)
+│   ├── player.py    #   pages communes aux lecteurs copiés de dramafren (fiche, liens)
+│   ├── flickreels.py #  FlickReels (lecteur dramafren, HLS du CDN officiel)
+│   ├── shortmax.py  #   ShortMax (lecteur shortmax.ngeshorts.fun, API video_server)
+│   └── netshort.py  #   NetShort (site officiel + API resolve_watch de dramafren, sous-titres WebVTT)
 ├── official.py      # métadonnées dramaboxdb.com
-├── dramafren.py     # API get_video (DramaBox)
+├── dramafren.py     # API get_video (DramaBox), get_video_url (GoodShort)
 ├── cdn.py           # formule de chemin, expiration (DramaBox)
 ├── http.py          # client urllib (retries sur erreurs réseau et 5xx)
 ├── download.py      # téléchargement reprenable + contrôles, affiche
 ├── hls.py           # épisodes HLS : segments reprenables, remux MP4 par ffmpeg
 ├── mp4.py           # durée, codecs, edit lists d'un MP4 (sans ffmpeg)
 ├── film.py          # fusion en un seul film (ffmpeg) + chapitres
+├── montage.py       # retouches avant le film : recette, rendu par épisode, cache (docs/06)
 ├── manifest.py      # état par série
 ├── pipeline.py      # orchestration, FetchControl, aperçu
 ├── library.py       # index de la bibliothèque (sdg ui), problèmes ignorés
@@ -670,8 +675,10 @@ Le moteur est indépendant de la plateforme. Chaque plateforme est un module de
 | `home_url`, `source_urls` | sondés par `connectivity` |
 
 `registry.py` liste les plateformes. Un lien est confié à celle qui revendique
-son domaine ; un domaine inconnu garde les règles souples de DramaBox (les
-liens de partage de l'app changent de domaine).
+son domaine le plus précisément (`Provider.claim`) : `goodshort.dramafren.org`
+va à GoodShort, le reste de `dramafren.org` à DramaBox. Un domaine inconnu
+garde les règles souples de DramaBox (les liens de partage de l'app changent
+de domaine).
 
 **Identifier une série.** `BookRef.provider` + `book_id`. La référence
 `ref_key` s'écrit `41000105199` pour DramaBox (inchangé) et
@@ -683,9 +690,12 @@ enregistre la plateforme dans `platform` (déjà présent, valait toujours
 `dramabox`) et les jobs dans `provider`. Les données anciennes, sans ces
 champs, sont lues comme DramaBox.
 
-**Épisodes gratuits seulement.** `Series.free_only` : la plateforme n'est
-téléchargée que depuis son site officiel, donc seuls ses épisodes gratuits le
-sont. « Tous les épisodes » veut alors dire les gratuits
+**Épisodes gratuits seulement.** `Series.free_only` (plus aucune plateforme :
+GoodShort et NetShort l'ont été avant de passer par dramafren) : la plateforme n'est téléchargée que
+depuis son site officiel, donc seuls ses épisodes gratuits le sont. Un épisode
+est gratuit s'il a sa vidéo officielle (`Episode.free_url`) ou si la
+plateforme le dit gratuit sans donner encore sa vidéo (`Episode.free`, lue au
+téléchargement). « Tous les épisodes » veut alors dire les gratuits
 (`pipeline.default_selection`), enregistrés comme sélection dans le manifest :
 les épisodes payants apparaissent « non demandés » et la série est complète
 quand tous les gratuits sont là. Un épisode payant demandé explicitement
@@ -695,8 +705,17 @@ quand tous les gratuits sont là. Un épisode payant demandé explicitement
 variante d'une playlist maître), segments téléchargés dans l'ordre et reprenables,
 remux en MP4 par ffmpeg (sans ré-encodage), puis les mêmes contrôles de durée.
 Les fichiers de travail sont tous des `E001.*.part`, que la bibliothèque, la
-file et la corbeille savent déjà gérer. Les flux chiffrés sont refusés
+file et la corbeille savent déjà gérer. Leur nom vient de la playlist, suivi
+de la qualité de la source (`E060.proxy.1080p.ts.part`) : les playlists de
+dramafren s'appellent toutes `/proxy`, et une reprise ne doit jamais mélanger
+deux qualités. Les flux chiffrés sont refusés
 (`hls_unsupported`). ffmpeg est donc nécessaire pour les plateformes HLS.
+
+**Sous-titres à part.** Une vidéo sans sous-titres incrustés peut venir avec
+les siens (`VideoSource.subtitles`, WebVTT ; NetShort). Ils sont enregistrés
+avant la vidéo, en `E001.{langue}.vtt`, et refusés s'ils ne commencent pas par
+`WEBVTT` (`subtitles_unreadable`). Avant la vidéo, car une relance saute un
+épisode déjà présent.
 
 **Ajouter une plateforme** : un module dans `providers/` et une ligne dans
 `registry.PROVIDERS` ; côté web, une entrée dans `PROVIDERS` de `detect.js`

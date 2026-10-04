@@ -12,6 +12,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 from collections import Counter
@@ -53,6 +54,7 @@ class FilmPlan:
     episode_count: int
     parts: list[Part]
     missing: list[int] = field(default_factory=list)
+    edit: dict | None = None  # montage.film_edit(): the film is made of edited episodes (montage/)
 
     @property
     def groups(self) -> dict[tuple, list[Part]]:
@@ -139,8 +141,13 @@ def find_series_dir(out_dir: Path, ref: BookRef, lang: str | None = None) -> Pat
 # --- planning -------------------------------------------------------------------
 
 
-def plan_film(series_dir: Path, allow_missing: bool = False, only: set[int] | None = None) -> FilmPlan:
-    """What would go into the film. ``only`` restricts it to some episode numbers."""
+def plan_film(
+    series_dir: Path, allow_missing: bool = False, only: set[int] | None = None, episodes_dir: Path | None = None
+) -> FilmPlan:
+    """What would go into the film. ``only`` restricts it to some episode numbers.
+
+    ``episodes_dir``: where the episode files are, when not in the series folder (edited episodes).
+    """
     if not series_dir.is_dir():
         raise FilmError(f"Dossier introuvable : {series_dir}", errors.SERIES_DIR_NOT_FOUND)
     manifest_path = series_dir / MANIFEST_FILENAME
@@ -159,7 +166,7 @@ def plan_film(series_dir: Path, allow_missing: bool = False, only: set[int] | No
 
     parts, missing = [], []
     for number in sorted(numbers):
-        path = series_dir / f"E{number:03d}.mp4"
+        path = (episodes_dir or series_dir) / f"E{number:03d}.mp4"
         try:
             info = mp4.probe(path) if path.exists() else None
         except (OSError, IndexError, ValueError, struct.error):  # truncated or corrupt file
@@ -221,14 +228,19 @@ def make_film(
     replace: bool = False,
     stop: threading.Event | None = None,
     on_progress: Progress | None = None,
+    episodes_dir: Path | None = None,
+    edit: dict | None = None,
 ) -> FilmResult:
     """Plan, check and build the film of a downloaded series.
 
     An existing film is never overwritten silently: if it is already up to date
-    (same episodes, none modified since) it is reused, otherwise FilmError
-    film_exists is raised unless ``replace`` is set.
+    (same episodes, none modified since, same montage) it is reused, otherwise
+    FilmError film_exists is raised unless ``replace`` is set. A film with a
+    montage (``edit``) replaces the film this tool made before under the same
+    name: the plain film is not worth keeping, it is rebuilt in seconds.
     """
-    plan = plan_film(series_dir, allow_missing, only)
+    plan = plan_film(series_dir, allow_missing, only, episodes_dir)
+    plan.edit = edit
     ensure_joinable(plan, reencode)
     if plan.missing:
         log(f"Attention : épisodes absents, film incomplet (manquent : {format_ranges(plan.missing)})")
@@ -240,16 +252,20 @@ def make_film(
             return existing
         manifest = Manifest.load(plan.series_dir)
         record = (manifest.data.get("film") if manifest else None) or {}
-        why = (
-            "Le film existant n'est plus à jour (épisodes modifiés ou différents)"
-            if record.get("file") in (output.name, str(output))
-            else "Un fichier porte déjà ce nom"
-        )
-        raise FilmError(
-            f"{why} : {output}. Ajoute --replace pour le remplacer, ou choisis un autre nom avec -f.",
-            errors.FILM_EXISTS,
-        )
+        ours = record.get("file") in (output.name, str(output))
+        if not (edit and ours):  # a montage replaces our own film, with an older montage or none
+            why = (
+                "Le film existant n'est plus à jour (épisodes modifiés ou différents)"
+                if ours
+                else "Un fichier porte déjà ce nom"
+            )
+            raise FilmError(
+                f"{why} : {output}. Ajoute --replace pour le remplacer, ou choisis un autre nom avec -f.",
+                errors.FILM_EXISTS,
+            )
     how = "avec ré-encodage, c'est long" if reencode else "sans ré-encodage"
+    if edit:
+        how += ", épisodes montés"
     log(f"Fusion de {len(plan.parts)} épisodes ({format_duration(plan.length(reencode))}, {how}) -> {output}")
     result = build_film(plan, output, ffmpeg, reencode, chapters, on_progress, stop)
     log(f"Film créé : {result.path} ({format_duration(result.duration)}, {result.size / 1e6:.0f} Mo)")
@@ -263,6 +279,8 @@ def up_to_date_film(plan: FilmPlan, output: Path) -> FilmResult | None:
     name = output.name if output.parent == plan.series_dir else str(output)
     if record.get("file") != name or record.get("episodes") != [p.number for p in plan.parts]:
         return None
+    if (record.get("edit") or {}).get("fp") != (plan.edit or {}).get("fp"):
+        return None  # a plain film is never "up to date" for a montage, nor the other way round
     stat = output.stat()
     if record.get("bytes") != stat.st_size or any(p.path.stat().st_mtime > stat.st_mtime for p in plan.parts):
         return None
@@ -413,14 +431,40 @@ def reencode_args(
     inline = filter_graph.replace("\n", "")
     if sum(len(a) + 3 for a in args) + len(inline) < MAX_COMMAND_LINE:
         args += ["-filter_complex", inline]
-    else:  # very long series: the graph goes in a file (option deprecated since ffmpeg 7, still accepted)
+    else:  # very long series: the graph goes in a file
         script = tmp_dir / "filter.txt"
         script.write_text(filter_graph, encoding="utf-8")
-        args += ["-filter_complex_script", str(script)]
+        args += filter_script_args(ffmpeg, script)
     args += ["-map", "[v]", "-map", "[a]", "-map_metadata", str(meta_index), "-map_chapters", str(meta_index)]
     args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
     args += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-f", "mp4", str(output)]
     return args
+
+
+def filter_script_args(ffmpeg: str, script: Path) -> list[str]:
+    """A filter graph read from a file: ``-/filter_complex`` since ffmpeg 7, which no longer
+    knows ``-filter_complex_script`` (ffmpeg 9.0.1: "Unrecognized option")."""
+    if ffmpeg_major(ffmpeg) >= 7:
+        return ["-/filter_complex", str(script)]
+    return ["-filter_complex_script", str(script)]
+
+
+_VERSIONS: dict[str, int] = {}
+
+
+def ffmpeg_major(ffmpeg: str) -> int:
+    """Major version of this ffmpeg; development builds ("N-…", "git-…") count as the newest."""
+    if ffmpeg not in _VERSIONS:
+        try:
+            first = subprocess.run(
+                [ffmpeg, "-hide_banner", "-version"], capture_output=True, text=True, timeout=20,
+                creationflags=NO_WINDOW,
+            ).stdout.split("\n", 1)[0]  # fmt: skip
+        except (OSError, subprocess.TimeoutExpired):
+            first = ""
+        m = re.match(r"ffmpeg version n?(\d+)\.", first)
+        _VERSIONS[ffmpeg] = int(m.group(1)) if m else 99
+    return _VERSIONS[ffmpeg]
 
 
 def reencode_filter(plan: FilmPlan) -> str:
@@ -527,17 +571,24 @@ def find_ffmpeg(explicit: str | None = None) -> str:
     raise FilmError(FFMPEG_HELP, errors.FFMPEG_MISSING)
 
 
+# Windows: no console window for ffmpeg when the app runs without one; renders at low priority.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+LOW_PRIORITY = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0) if sys.platform == "win32" else 0
+
+
 def _run_ffmpeg(
     args: list[str],
     total: float,
     log_path: Path,
     on_progress: Progress | None,
     stop: threading.Event | None = None,
+    low_priority: bool = False,
 ) -> None:
     with log_path.open("w+", encoding="utf-8", errors="replace") as log:
         try:
             proc = subprocess.Popen(
-                args, stdout=subprocess.PIPE, stderr=log, text=True, encoding="utf-8", errors="replace"
+                args, stdout=subprocess.PIPE, stderr=log, text=True, encoding="utf-8", errors="replace",
+                creationflags=NO_WINDOW | (LOW_PRIORITY if low_priority else 0),
             )
         except OSError as e:
             raise FilmError(f"Impossible de lancer ffmpeg : {e}", errors.FFMPEG_MISSING) from None
@@ -553,6 +604,8 @@ def _run_ffmpeg(
             proc.kill()
             proc.wait()
             raise
+        finally:
+            proc.stdout.close()
         if code != 0:
             log.seek(0)
             details = log.read().strip().splitlines()[-5:]
@@ -575,6 +628,7 @@ def _record_in_manifest(plan: FilmPlan, result: FilmResult, marks: list[tuple[in
             "chapters": result.chapters,
             "chapter_times": [[n, round(start, 3), round(end, 3)] for n, start, end in marks],
             "created_at": now_iso(),
+            **({"edit": plan.edit} if plan.edit else {}),
         },
     )
 

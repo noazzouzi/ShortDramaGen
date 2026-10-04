@@ -1,7 +1,7 @@
 // Fiche série (spec E3, E4) : héros, versions, santé et action principale, grille d'épisodes
 // avec sélection, volet de détail, film (pré-vol, remèdes, création), stockage, détails.
 
-import { ApiError, get } from "../api.js";
+import { ApiError, del, get, post, put } from "../api.js";
 import { append, clear, codeBox, copyText, h, icon } from "../dom.js";
 import { bytes, capitalize, duration, fullDate, htmlLang, langName, plural, ranges, versionLong, versionShort, versionSlug, when } from "../format.js";
 import { EPISODE, ERRORS, counts, primaryAction } from "../status.js";
@@ -456,7 +456,7 @@ function filmSection(ctx, group, detail, ui) {
     const pct = p?.seconds_total ? Math.round((p.seconds_done / p.seconds_total) * 100) : 0;
     title.append(h("span", { class: "badge badge-active", text: filmJob.status === "queued" ? "En file" : "En cours" }));
     const btn = h("div", { class: "btn btn-lg btn-primary btn-progress", role: "progressbar", "aria-valuenow": String(pct), "aria-valuemin": "0", "aria-valuemax": "100" },
-      h("span", { text: filmJob.status === "queued" ? "En attente…" : `Assemblage… ${pct} %${p?.eta_s ? ` · ≈ ${duration(p.eta_s)}` : ""}` }));
+      h("span", { text: filmJob.status === "queued" ? "En attente…" : `${filmJob.phase === "rendering" ? "Montage des épisodes…" : "Assemblage…"} ${pct} %${p?.eta_s ? ` · ≈ ${duration(p.eta_s)}` : ""}` }));
     btn.style.setProperty("--p", (pct / 100).toFixed(3));
     card.append(h("div", { class: "btn-row" }, btn, h("button", { class: "btn btn-secondary", type: "button", onclick: () => ctx.act.jobCommand(filmJob, "cancel"), text: "Annuler" })));
     return card;
@@ -473,6 +473,7 @@ function filmSection(ctx, group, detail, ui) {
         : `Film obsolète (épisodes ${film.episodes}) : ${film.added_since?.length ? `${plural(film.added_since.length, "épisode ajouté", "épisodes ajoutés")} depuis (${ranges(film.added_since)})` : "des épisodes ont changé depuis sa création"}.`;
     card.append(
       h("p", { class: "film-state", text: sentence }),
+      film.montage ? h("p", { class: "note", text: `Film monté : ${film.montage}.` }) : null,
       h("div", { class: "btn-row" },
         h("a", { class: "btn btn-primary", href: theaterHref(group, detail, "film") }, icon("play"), "Regarder le film"),
         h("button", { class: "btn btn-secondary", type: "button", onclick: () => ctx.act.open(key, "film") }, icon("folder"), "Afficher dans le dossier"),
@@ -595,6 +596,163 @@ function filmSection(ctx, group, detail, ui) {
   return card;
 }
 
+// --- montage ---------------------------------------------------------------------------------------------------------------
+
+const LOOKS = { aucun: "Aucun", vif: "Couleurs vives", doux: "Doux", nb: "Noir et blanc" };
+const SPEEDS = [1, 1.1, 1.25, 1.5, 2];
+const PASSAGE_SPEEDS = [1.25, 1.5, 2, 3];
+
+const num = (x) => String(Math.round(x * 100) / 100).replace(".", ",");
+
+// "1:20,5" ou "80" → secondes ; null si illisible.
+function parseClock(text) {
+  const m = String(text).trim().replace(",", ".").match(/^(?:(\d+):)?(\d+(?:\.\d+)?)$/);
+  return m ? Number(m[1] || 0) * 60 + Number(m[2]) : null;
+}
+
+function clock(seconds) {
+  if (seconds < 60) return num(seconds);
+  const m = Math.floor(seconds / 60);
+  const rest = seconds - m * 60;
+  return `${m}:${rest < 10 ? "0" : ""}${num(rest)}`;
+}
+
+function passageLines(recipe) {
+  const out = [];
+  for (const [n, ep] of Object.entries(recipe.episodes || {}).sort(([a], [b]) => a - b)) {
+    if (ep.trim) {
+      const parts = [ep.trim.start !== undefined ? `${num(ep.trim.start)} s au début` : null, ep.trim.end !== undefined ? `${num(ep.trim.end)} s à la fin` : null].filter(Boolean);
+      out.push({ n, text: `Épisode ${n} : coupe ${parts.join(", ")}`, remove: (r) => { delete r.episodes[n].trim; } });
+    }
+    (ep.ranges || []).forEach((p, i) => out.push({
+      n,
+      text: `Épisode ${n} : ${clock(p.from)} → ${clock(p.to)} ${p.cut ? "coupé" : `×${num(p.speed)}`}`,
+      remove: (r) => { r.episodes[n].ranges.splice(i, 1); if (!r.episodes[n].ranges.length) delete r.episodes[n].ranges; },
+    }));
+  }
+  return out;
+}
+
+function montageSection(ctx, group, detail, ui) {
+  const key = detail.series_key;
+  const card = h("section", { class: "card montage-card", id: "montage", "aria-labelledby": "titre-montage" });
+  const title = h("h2", { class: "section-title", id: "titre-montage" }, "Montage");
+  card.append(title);
+  if (!counts(detail).present) {
+    card.append(h("p", { class: "film-state", text: "Le montage se règle une fois les épisodes téléchargés." }));
+    return card;
+  }
+  const m = ui.montage;
+  if (!m) {
+    card.append(h("p", { class: "note", role: "status", text: "Chargement du montage…" }));
+    ui.loadMontage();
+    return card;
+  }
+  if (m.loadError) {
+    card.append(h("div", { class: "notice is-danger", role: "alert" }, icon("alert", { size: 20 }), h("p", { text: m.loadError })));
+    return card;
+  }
+  const r = ui.montageDraft;
+  const filmJob = ctx.state.jobs.active.find((j) => j.kind === "film" && j.series_key === key);
+  if (m.recipe) title.append(h("span", { class: "badge badge-info", text: "Réglé" }));
+  const rendered = m.rendered ? ` · ${plural(m.rendered, "épisode déjà monté", "épisodes déjà montés")} (${bytes(m.rendered_bytes)})` : "";
+  card.append(h("p", { class: "film-state", text: m.summary ? `${capitalize(m.summary)}${rendered}.` : "Aucune retouche. Ce qui est réglé ici s'applique à chaque épisode, puis au film." }));
+  if (m.error) card.append(h("div", { class: "notice is-warning" }, icon("alert", { size: 20 }), h("p", { text: `montage.json n'a pas pu être lu : ${m.error}` })));
+
+  const change = (fn) => { fn(r); ui.saveMontage(); };
+  const check = (label, checked, onchange, disabled = false) =>
+    h("label", { class: "check-inline" }, h("input", { type: "checkbox", checked: checked || null, disabled: disabled || null, onchange }), label);
+  const seconds = (label, value, onchange) =>
+    h("label", { class: "form-row" }, h("span", { text: label }),
+      h("span", {}, h("input", { class: "text-field num-field", type: "number", min: 0, max: 120, step: 0.5, value, onchange }), " s"));
+  const choice = (label, options, value, onchange) =>
+    h("label", { class: "form-row" }, h("span", { text: label }),
+      h("span", { class: "select" }, h("select", { onchange }, options.map(([v, text]) => h("option", { value: v, selected: String(v) === String(value) || null, text })))));
+
+  const speeds = SPEEDS.includes(r.speed) ? SPEEDS : [...SPEEDS, r.speed].sort((a, b) => a - b);
+  card.append(h("div", { class: "montage-grid" },
+    h("div", { class: "montage-group" },
+      h("h3", { class: "overline", text: "Image" }),
+      check("Miroir (image retournée gauche-droite)", r.mirror, (e) => change((x) => { x.mirror = e.target.checked; })),
+      check("Garder les sous-titres incrustés lisibles", r.keep_subtitles, (e) => change((x) => { x.keep_subtitles = e.target.checked; }), !r.mirror),
+      r.mirror && r.keep_subtitles
+        ? h("p", { class: "note", text: m.band ? `Sous-titres repérés entre ${Math.round(m.band[0] * 100)} et ${Math.round(m.band[1] * 100)} % de la hauteur : recollés à l'endroit.` : "La zone des sous-titres est repérée au premier rendu, puis recollée à l'endroit." })
+        : r.mirror ? h("p", { class: "note", text: "Les sous-titres incrustés par la plateforme seront à l'envers." }) : null,
+      choice("Couleurs", Object.entries(LOOKS), r.look.preset, (e) => change((x) => { x.look = { preset: e.target.value }; }))),
+    h("div", { class: "montage-group" },
+      h("h3", { class: "overline", text: "Durée" }),
+      seconds("Couper au début", r.trim.start, (e) => change((x) => { x.trim.start = Math.max(0, Number(e.target.value) || 0); })),
+      seconds("Couper à la fin", r.trim.end, (e) => change((x) => { x.trim.end = Math.max(0, Number(e.target.value) || 0); })),
+      choice("Vitesse", speeds.map((s) => [s, s === 1 ? "Normale" : `×${num(s)}`]), r.speed, (e) => change((x) => { x.speed = Number(e.target.value); })))));
+
+  // Passages d'un épisode : accélérés ou coupés (temps de l'épisode d'origine).
+  const lines = passageLines(r);
+  const pf = ui.passageForm;
+  const epField = h("input", { class: "text-field num-field", type: "number", min: 1, value: pf.episode, "aria-label": "Épisode", onchange: (e) => { pf.episode = Number(e.target.value) || 1; } });
+  const fromField = h("input", { class: "text-field num-field mono", type: "text", value: pf.from, placeholder: "0:40", "aria-label": "Début du passage", onchange: (e) => { pf.from = e.target.value; } });
+  const toField = h("input", { class: "text-field num-field mono", type: "text", value: pf.to, placeholder: "0:55", "aria-label": "Fin du passage", onchange: (e) => { pf.to = e.target.value; } });
+  const actionField = h("select", { "aria-label": "Effet", onchange: (e) => { pf.action = e.target.value; } },
+    [["cut", "Couper"], ...PASSAGE_SPEEDS.map((s) => [String(s), `Accélérer ×${num(s)}`])].map(([v, text]) => h("option", { value: v, selected: pf.action === v || null, text })));
+  const add = () => {
+    const from = parseClock(fromField.value);
+    const to = parseClock(toField.value);
+    if (from === null || to === null || to <= from) {
+      pf.error = "Indique un début et une fin en secondes ou min:s (ex. 0:40 et 0:55), la fin après le début.";
+      ctx.rerender();
+      return;
+    }
+    pf.error = null;
+    const n = String(Number(epField.value) || 1);
+    change((x) => {
+      const ep = (x.episodes[n] ||= {});
+      ep.ranges = [...(ep.ranges || []), pf.action === "cut" ? { from, to, cut: true } : { from, to, speed: Number(pf.action) }].sort((a, b) => a.from - b.from);
+    });
+    pf.from = "";
+    pf.to = "";
+  };
+  card.append(h("div", { class: "montage-group" },
+    h("h3", { class: "overline", text: "Passages d'un épisode" }),
+    lines.length
+      ? h("ul", { class: "passages" }, lines.map((l) => h("li", {}, h("span", { text: l.text }),
+          h("button", { class: "btn btn-sm btn-ghost", type: "button", "aria-label": `Retirer : ${l.text}`, onclick: () => change((x) => { l.remove(x); if (!Object.keys(x.episodes[l.n] || {}).length) delete x.episodes[l.n]; }) }, icon("close", { size: 14 })))))
+      : h("p", { class: "note", text: "Aucun. Exemple : accélérer une scène lente, couper un passage." }),
+    h("div", { class: "passage-form" }, h("span", { text: "Épisode" }), epField, h("span", { text: "de" }), fromField, h("span", { text: "à" }), toField, h("span", { class: "select" }, actionField),
+      h("button", { class: "btn btn-sm btn-secondary", type: "button", onclick: add, text: "Ajouter" })),
+    pf.error ? h("p", { class: "save-status is-error", role: "alert", text: pf.error }) : null));
+
+  card.append(h("details", { class: "film-options", open: ui.montageRenderOpen || null, ontoggle: (e) => { ui.montageRenderOpen = e.target.open; } },
+    h("summary", { text: "Encodage" }),
+    choice("Encodeur", [["auto", "Automatique (carte AMD si elle marche)"], ["x264", "Processeur (x264)"], ["amf", "Carte AMD (AMF)"]], r.render.encoder, (e) => change((x) => { x.render.encoder = e.target.value; })),
+    choice("Qualité", [["standard", "Standard"], ["compacte", "Compacte (fichiers plus petits)"]], r.render.quality, (e) => change((x) => { x.render.quality = e.target.value; }))));
+
+  const st = ui.montageStatus;
+  if (st) {
+    card.append(h("p", { class: `save-status ${st.error ? "is-error" : "is-ok"}`, role: st.error ? "alert" : "status",
+      text: st.error ? `Non enregistré : ${st.error}` : st === "saving" ? "Enregistrement…" : "Enregistré." }));
+  }
+
+  // Aperçu : quelques secondes rendues tout de suite, avec les réglages enregistrés.
+  const pv = ui.montagePreview;
+  card.append(h("div", { class: "montage-group" },
+    h("h3", { class: "overline", text: "Aperçu" }),
+    h("div", { class: "passage-form" },
+      h("span", { text: "Épisode" }), h("input", { class: "text-field num-field", type: "number", min: 1, value: pv.episode, "aria-label": "Épisode de l'aperçu", onchange: (e) => { pv.episode = Number(e.target.value) || 1; } }),
+      h("span", { text: "à" }), h("input", { class: "text-field num-field mono", type: "text", value: pv.at, placeholder: "0:30", "aria-label": "Début de l'aperçu", onchange: (e) => { pv.at = e.target.value; } }),
+      h("button", { class: "btn btn-sm btn-secondary", type: "button", disabled: pv.busy || filmJob || null, onclick: () => ui.previewMontage() }, icon("play", { size: 14 }), pv.busy ? "Rendu…" : "Aperçu 8 s")),
+    pv.error ? h("p", { class: "save-status is-error", role: "alert", text: pv.error }) : null,
+    pv.url ? h("video", { class: "montage-preview", src: pv.url, controls: true, autoplay: true, playsinline: true }) : null));
+
+  if (ui.montageFilmError) card.append(h("div", { class: "notice is-danger", role: "alert" }, icon("alert", { size: 20 }), h("p", { text: ui.montageFilmError })));
+  card.append(
+    h("div", { class: "remedy" },
+      h("button", { class: "btn btn-lg btn-primary", type: "button", disabled: !m.recipe || filmJob || detail.job || null, onclick: () => ui.createMontageFilm() }, icon("film"), "Créer le film monté"),
+      h("span", { class: "remedy-note", text: filmJob ? "Un film est en préparation (voir Film)." : "Chaque épisode est retouché une fois, puis le film est assemblé en quelques secondes. Il remplace le film actuel." })),
+    h("div", { class: "btn-row" },
+      m.recipe ? h("button", { class: "btn btn-ghost", type: "button", onclick: () => ui.deleteMontage() }, "Retirer le montage") : null),
+    codeBox(`python -m shortdramagen film "${detail.path}" --montage`, "Copier la commande"));
+  return card;
+}
+
 // --- stockage et détails ---------------------------------------------------------------------------------------------------
 
 function storageSection(ctx, detail) {
@@ -667,7 +825,7 @@ export function renderSeries(main, ctx, { group, detail, ui }) {
     hero(ctx, group, detail),
     healthBar(ctx, group, detail),
     h("div", { class: "cols" },
-      h("div", { class: "col-main" }, episodesSection(ctx, group, detail, ui), filmSection(ctx, group, detail, ui), storageSection(ctx, detail), techSection(detail)),
+      h("div", { class: "col-main" }, episodesSection(ctx, group, detail, ui), filmSection(ctx, group, detail, ui), montageSection(ctx, group, detail, ui), storageSection(ctx, detail), techSection(detail)),
       side),
   ));
 }
@@ -688,6 +846,13 @@ export function seriesUi(ctx, key) {
     optionsOpen: false,
     detail: null,
     fillSide: null,
+    montage: null, // état serveur : recette, épisodes déjà montés, zone des sous-titres
+    montageDraft: null, // recette en cours d'édition, enregistrée 500 ms après le dernier changement
+    montageStatus: null,
+    montageFilmError: null,
+    montageRenderOpen: false,
+    passageForm: { episode: 1, from: "", to: "", action: "cut", error: null },
+    montagePreview: { episode: 1, at: "0", url: null, busy: false, error: null },
     bind(detail, fillSide) {
       this.detail = detail;
       this.fillSide = fillSide;
@@ -695,7 +860,83 @@ export function seriesUi(ctx, key) {
       if (this.planVersion !== version) {
         this.plan = null;
         this.planVersion = version;
+        if (this.montageStatus !== "saving") this.montage = null; // épisodes montés entre-temps : relu
       }
+    },
+    montageUrl() {
+      return `/api/series/${encodeURIComponent(key)}/montage`;
+    },
+    setMontage(data) {
+      this.montage = data;
+      this.montageDraft = structuredClone(data.recipe || data.defaults);
+    },
+    async loadMontage() {
+      if (this.loadingMontage) return;
+      this.loadingMontage = true;
+      try {
+        this.setMontage((await get(this.montageUrl())).data);
+      } catch (err) {
+        this.montage = { loadError: err.message };
+      }
+      this.loadingMontage = false;
+      ctx.rerender();
+    },
+    saveMontage() {
+      clearTimeout(this.saveTimer);
+      this.montageStatus = "saving";
+      ctx.rerender();
+      this.saveTimer = setTimeout(() => this.flushMontage(), 500);
+    },
+    async flushMontage() {
+      clearTimeout(this.saveTimer);
+      if (this.montageStatus !== "saving") return;
+      try {
+        this.setMontage((await put(this.montageUrl(), this.montageDraft)).data);
+        this.montageStatus = "saved";
+      } catch (err) {
+        this.montageStatus = { error: err.message };
+      }
+      ctx.rerender();
+    },
+    async deleteMontage() {
+      clearTimeout(this.saveTimer);
+      try {
+        this.setMontage((await del(this.montageUrl())).data);
+        this.montageStatus = null;
+      } catch (err) {
+        this.montageStatus = { error: err.message };
+      }
+      ctx.rerender();
+    },
+    async previewMontage() {
+      const pv = this.montagePreview;
+      const at = parseClock(pv.at || "0");
+      if (at === null) {
+        pv.error = "Début attendu en secondes ou min:s (ex. 1:20).";
+        ctx.rerender();
+        return;
+      }
+      await this.flushMontage();
+      pv.busy = true;
+      pv.error = null;
+      ctx.rerender();
+      try {
+        pv.url = (await post(`${this.montageUrl()}/preview`, { episode: pv.episode, at, seconds: 8 })).data.media_url;
+      } catch (err) {
+        pv.error = err.message;
+      }
+      pv.busy = false;
+      ctx.rerender();
+    },
+    async createMontageFilm() {
+      await this.flushMontage();
+      this.montageFilmError = null;
+      try {
+        await ctx.act.createFilm(key, { montage: true, chapters: this.filmOptions.chapters, allow_missing: this.filmOptions.allow_missing });
+      } catch (err) {
+        this.montageFilmError = err instanceof ApiError ? err.message : String(err);
+      }
+      ctx.rerender();
     },
     show(n, rerender = true) {
       this.shown = n;

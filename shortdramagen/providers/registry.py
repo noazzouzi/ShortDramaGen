@@ -7,9 +7,12 @@ from urllib.parse import ParseResult
 from ..models import DEFAULT_PROVIDER, BookRef
 from .base import Provider
 from .dramabox import DramaBox
+from .flickreels import FlickReels
 from .goodshort import GoodShort
+from .netshort import NetShort
+from .shortmax import ShortMax
 
-PROVIDERS: tuple[Provider, ...] = (DramaBox(), GoodShort())
+PROVIDERS: tuple[Provider, ...] = (DramaBox(), GoodShort(), FlickReels(), ShortMax(), NetShort())
 _BY_NAME = {p.name: p for p in PROVIDERS}
 
 
@@ -26,10 +29,9 @@ def names() -> list[str]:
 
 
 def parse_link(parsed: ParseResult) -> BookRef | None:
-    """The series a link points at. A host no platform claims gets DramaBox's permissive rules,
-    as before platforms existed (the app's share links use changing domains)."""
+    """The series a link points at. The most specific host wins (goodshort.dramafren.org is
+    GoodShort's, shortmax.dramafren.org ShortMax's, the rest of dramafren.org DramaBox's). A host no platform claims gets DramaBox's
+    permissive rules, as before platforms existed (the app's share links use changing domains)."""
     host = (parsed.hostname or "").lower()
-    for provider in PROVIDERS:
-        if provider.handles(host):
-            return provider.parse_link(parsed)
-    return get(DEFAULT_PROVIDER).parse_link(parsed)
+    provider = max(PROVIDERS, key=lambda p: p.claim(host))
+    return (provider if provider.claim(host) else get(DEFAULT_PROVIDER)).parse_link(parsed)

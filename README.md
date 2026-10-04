@@ -1,10 +1,9 @@
 # ShortDramaGen
 
-Récupère automatiquement **tous les épisodes** d'une série DramaBox à partir
-d'une simple URL : jusqu'en 1080p, avec reprise sur coupure et vérification
-de chaque fichier. Pour GoodShort, il récupère les épisodes gratuits du site
-officiel. L'outil peut ensuite les **fusionner en un seul film** avec
-un chapitre par épisode.
+Récupère automatiquement **tous les épisodes** d'une série DramaBox, GoodShort,
+FlickReels, ShortMax ou NetShort à partir d'une simple URL : jusqu'en 1080p, avec reprise sur coupure et vérification de chaque
+fichier. L'outil peut ensuite les **fusionner en un
+seul film** avec un chapitre par épisode.
 
 ```text
 $ python -m shortdramagen fetch "https://dramabox.dramafren.org/index.php?page=detail&id=41000105199&lang=fr" --lang fr
@@ -30,7 +29,7 @@ pip install -e .                      # optionnel : ajoute la commande « sdg »
 ```
 
 Pour la **fusion en film** et pour les plateformes servies en HLS
-(GoodShort), il faut aussi ffmpeg. Le plus simple est
+(GoodShort, FlickReels, ShortMax), il faut aussi ffmpeg. Le plus simple est
 `pip install imageio-ffmpeg` (ou `pip install -e ".[ffmpeg]"`), qui fournit
 ffmpeg sans installation système. Sinon : `winget install Gyan.FFmpeg`
 (Windows), `brew install ffmpeg` (macOS) ou `apt install ffmpeg` (Linux).
@@ -83,6 +82,33 @@ python -m shortdramagen film "downloads/41000105199-one-night-to-forever" -f "C:
   épisodes, aucun modifié depuis), il est simplement réutilisé ; sinon l'outil
   refuse. `--replace` le reconstruit, `-f` choisit un autre nom.
 
+### Montage (retouches avant le film)
+
+```bash
+# Miroir (les sous-titres incrustés restent lisibles), 3 s coupées au début et 4 s à la fin de chaque épisode
+python -m shortdramagen montage set goodshort:31000835255 --mirror --trim-start 3 --trim-end 4 --look vif
+# Un épisode : passage accéléré, passage coupé
+python -m shortdramagen montage set goodshort:31000835255 -e 17 --range 0:40-0:55x1.5 --cut 1:20-1:32
+python -m shortdramagen montage preview goodshort:31000835255 -e 17 --at 0:38   # 8 s rendues pour juger
+python -m shortdramagen film goodshort:31000835255 --montage                   # film monté
+python -m shortdramagen montage show goodshort:31000835255
+```
+
+- Les épisodes téléchargés ne sont jamais modifiés. Chaque épisode est
+  retouché une fois dans `<série>/montage/`, puis le film est assemblé sans
+  ré-encodage. Modifier un épisode ne refait que lui.
+- **Miroir** : les sous-titres incrustés par la plateforme sont recollés à
+  l'endroit (`--no-keep-subs` pour tout retourner). Leur zone est repérée
+  automatiquement ; `--band 74-84` la force.
+- **Autres réglages** : looks `vif`, `doux`, `nb` (et `--brightness`,
+  `--contrast`, `--saturation`), vitesse globale `--speed 1.25`. L'encodeur
+  est AMD (AMF) s'il marche, sinon x264 (`--encoder`, `--quality compacte`).
+- Le film monté **remplace** le film brut, qui se refait en quelques secondes.
+- **Durée** : environ 5 à 7 fois plus vite que la lecture (60 épisodes :
+  15 à 25 min), puis quelques secondes d'assemblage. Tout est aussi réglable
+  dans la carte « Montage » de `sdg ui`. Détails :
+  [06 — Montage](docs/06-montage.md).
+
 ### Interface web
 
 ```bash
@@ -124,9 +150,26 @@ python -m shortdramagen ui --window              # fenêtre d'application Edge/C
 - **DramaBox** : URL `dramaboxdb.com` (série ou épisode, avec ou sans `/fr/`),
   `dramabox.com/drama/…`, lien de partage de l'app, URL dramafren (`detail` ou
   `watch`), ou l'identifiant seul (`41000105199`).
-- **GoodShort** : URL `goodshort.com/drama/…`, `/episodes/…` ou `/episode/…`,
-  ou `goodshort:31000662271`. Seuls les épisodes gratuits du site officiel
-  sont téléchargés ; sans `-e`, « tout » veut dire ces épisodes-là.
+- **GoodShort** : URL dramafren
+  (`goodshort.dramafren.org/index.php?page=detail&id=31000835255…`, ou
+  `watch`), URL `goodshort.com/drama/…`, `/episodes/…` ou `/episode/…`, ou
+  `goodshort:31000662271`. Tous les épisodes, payants compris, viennent de
+  dramafren (HLS, donc ffmpeg requis).
+- **FlickReels** : URL dramafren
+  (`flickreels.dramafren.org/index.php?page=detail&id=9561…`, ou `watch`), URL
+  `flickreels.net/…/episodes-list/…`, `/movie/…` ou `/playlist/…`, ou
+  `flickreels:9561`. Tout vient de dramafren (HLS, donc ffmpeg requis).
+- **ShortMax** : URL du lecteur
+  (`shortmax.ngeshorts.fun/index.php?page=detail&id=24403…`, ou `watch`), URL
+  `shorttv.live/…/drama/…` ou `/episode/…` (ex-`shortmax.com`), ou
+  `shortmax:24403`. Tout vient du lecteur (HLS, donc ffmpeg requis).
+- **NetShort** : URL `netshort.com/…/episode/…` (série ou épisode,
+  `-ep-12`), `/full-episodes/…`, URL dramafren
+  (`netshort.dramafren.org/index.php?page=detail&id=…`, ou `watch`), ou
+  `netshort:2103009231354593281`. Tous les épisodes, en MP4 sans ffmpeg :
+  540p depuis dramafren, 720p depuis le site officiel pour les gratuits (les
+  7 à 9 premiers en général). Chaque version (VF…) a son propre lien ; ses
+  sous-titres sont enregistrés à côté de l'épisode (`E001.fr.vtt`).
 
 **Langue** : par défaut, la version de l'URL (VO en général). `--lang fr`,
 `es`, `ko`… prend la version doublée si elle existe. Sinon l'outil prévient et
@@ -141,6 +184,7 @@ repartent de leur `.part`.
 ```text
 downloads/41000105199-one-night-to-forever-fr/
 ├── E001.mp4 … E062.mp4
+├── E001.fr.vtt …      # sous-titres à part (NetShort), lus par VLC
 ├── cover.jpg          # affiche de la série (pour l'interface)
 ├── Qui Est la Véritable Mme Lafont.mp4   # avec --film ou « sdg film »
 └── manifest.json      # titre, épisodes, statut, qualité, URL et expiration, taille, code d'erreur, film
@@ -166,6 +210,31 @@ Le moteur est commun à toutes les plateformes ; ce qui est propre à chacune
    une durée imposée pour chacun et des chapitres calculés sur ces mêmes
    durées (voir [architecture §3.9](docs/02-architecture.md#39-filmpy--fusion-en-un-seul-film)).
 
+Pour GoodShort, les métadonnées viennent aussi du site officiel
+(`goodshort.com`, liste complète des chapitres) et les vidéos de l'API
+`get_video_url` de dramafren : des playlists HLS en 540p, 720p et 1080p,
+passant par le proxy de dramafren, remuxées en MP4 par ffmpeg. Ce proxy est
+**lent et irrégulier** : de 1 s à plus d'une minute par segment de 5 s. Le
+27/09/2026, 2 épisodes (1 min 30 et 1 min 43) ont pris 15 min. Augmenter `-j`
+aide, car l'attente vient de la latence de chaque requête (voir
+[plateformes](docs/05-plateformes.md#vidéos-via-dramafren)).
+
+Pour FlickReels, tout vient du lecteur de dramafren : titre, affiche et nombre
+d'épisodes sur sa fiche, et pour chaque épisode l'URL HLS du CDN officiel
+(1080p, rapide). L'API du site officiel signe ses appels : elle n'est pas
+utilisée, donc pas de durée officielle. Chaque fichier est vérifié contre la
+durée de sa playlist (voir [plateformes](docs/05-plateformes.md#flickreels)).
+ShortMax fonctionne de même avec le lecteur `shortmax.ngeshorts.fun` et son
+API `video_server` : 1080p, 720p ou 480p, depuis le CDN officiel (voir
+[plateformes](docs/05-plateformes.md#shortmax)).
+
+Pour NetShort, la page de chaque épisode sur le site officiel `netshort.com`
+donne sa durée (pour le contrôle) et, pour un épisode gratuit, sa vidéo (MP4
+720p) et ses sous-titres WebVTT. Les autres épisodes viennent de l'API
+`resolve_watch` du lecteur dramafren, servie sans challenge par
+`cdn-netshort.dramafren.org` (MP4 540p du CDN officiel, sous-titres) (voir
+[plateformes](docs/05-plateformes.md#netshort)).
+
 ## Documentation
 
 | Doc | Contenu |
@@ -174,12 +243,13 @@ Le moteur est commun à toutes les plateformes ; ce qui est propre à chacune
 | [02 — Architecture](docs/02-architecture.md) | Composants, flux, manifest, moteur pilotable (événements, codes d'erreur), choix techniques |
 | [03 — Brainstorm & roadmap](docs/03-brainstorm-et-roadmap.md) | Approches comparées, risques, plans B, suite |
 | [04 — Frontend](docs/04-frontend.md) | Interface web : recherche, 3 concepts et jury, spec, système visuel, API, maquette, avancement (étapes 0 à 3 livrées) |
-| [05 — Plateformes](docs/05-plateformes.md) | Plateformes au-delà de DramaBox : état de l'étude, constats GoodShort, points non vérifiés |
+| [05 — Plateformes](docs/05-plateformes.md) | Plateformes au-delà de DramaBox : état de l'étude, constats GoodShort, FlickReels, ShortMax et NetShort, points non vérifiés |
+| [06 — Montage](docs/06-montage.md) | Retouches avant le film : miroir avec sous-titres gardés, coupes, looks, passages accélérés ; mesures ffmpeg |
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests      # 151 tests, hors ligne, environ 20 s
+python -m unittest discover -s tests      # 213 tests, hors ligne, environ 29 s
 # (4 tests de fusion utilisent un vrai ffmpeg ; ils sont ignorés s'il est absent)
 ```
 

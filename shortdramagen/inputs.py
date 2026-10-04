@@ -73,4 +73,4 @@ def parse_input(text: str) -> BookRef:
 
 def accepted_formats() -> str:
     links = ", ".join(p.example_link for p in registry.PROVIDERS)
-    return f"un lien de série ({links}), un n° de série DramaBox (ex. 41000105199) ou plateforme:n° (ex. goodshort:31000662271)."
+    return f"un lien de série ({links}), un n° de série DramaBox (ex. 41000105199) ou plateforme:n° (ex. goodshort:31000662271, flickreels:9561, shortmax:24403, netshort:2103009231354593281)."

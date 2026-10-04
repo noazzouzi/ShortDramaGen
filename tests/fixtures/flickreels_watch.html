@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en"><head><title>SSS : Le Dieu de la Foudre - Full Episodes Free | FlickReels Player</title></head><body>
+<script>
+                var videoPlayer = document.getElementById('player');
+                var videoContainer = document.getElementById('video-container');
+                var currentEp = 30;
+                var totalEp = 61;
+                var dramaId = "9561";
+                var currentLang = "fr";
+                
+                var availableQualities = [{"quality":"Default Auto","url":"https:\/\/zshipricf.farsunpteltd.com\/playlet-hls\/1786948437_hls_43051.m3u8?verify=1790529231-00000000000000000000000000000000000000000000"}];
+                
+                // --- MODIFIKASI: STRUKTUR DATA SERVER DENGAN ID ---
+                var availableServers = [];
+                                availableServers.push({
+                    id: 1,
+                    name: 'Server 1',
+                    url: "https:\/\/zshipricf.farsunpteltd.com\/playlet-hls\/1786948437_hls_43051.m3u8?verify=1790529231-00000000000000000000000000000000000000000000",
+                    corsFallbackUrl: "https:\/\/cdn-flickreels.dramafren.org\/index.php?action=proxy_m3u8&url=https%3A%2F%2Fzshipricf.farsunpteltd.com%2Fplaylet-hls%2F1786948437_hls_43051.m3u8%3Fverify%3D1790529231-00000000000000000000000000000000000000000000",
+                    lazy: false
+                });
+                                                availableServers.push({
+                    id: 2,
+                    name: 'Server 2',
+                    url: "",
+                    corsFallbackUrl: "",
+                    lazy: true,
+                    endpoint: "index.php?action=server2_stream&id=9561&ep=30&lang=fr&chapter_id=632608",
+                    isLoading: false
+                });
+                
+                var initialVideoUrl = "https:\/\/zshipricf.farsunpteltd.com\/playlet-hls\/1786948437_hls_43051.m3u8?verify=1790529231-00000000000000000000000000000000000000000000";
+                var currentPlayingUrl = initialVideoUrl;
+                var corsFallbackUrls = {"https:\/\/zshipricf.farsunpteltd.com\/playlet-hls\/1786948437_hls_43051.m3u8?verify=1790529231-00000000000000000000000000000000000000000000":"https:\/\/cdn-flickreels.dramafren.org\/index.php?action=proxy_m3u8&url=https%3A%2F%2Fzshipricf.farsunpteltd.com%2Fplaylet-hls%2F1786948437_hls_43051.m3u8%3Fverify%3D1790529231-00000000000000000000000000000000000000000000"};
+                
+                var currentServer = "1";
+                var serverParam = currentServer ? `&server=${currentServer}` : '';
+</script>
+</body></html>

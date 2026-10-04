@@ -23,6 +23,7 @@ export const ERRORS = {
   url_rejected: "La source a refusé le lien (il avait peut-être expiré).",
   size_mismatch: "Le téléchargement a été coupé avant la fin.",
   mp4_unreadable: "Le fichier reçu était illisible : il a été écarté.",
+  subtitles_unreadable: "Les sous-titres reçus étaient illisibles : ils ont été écartés.",
   duration_mismatch: "Le fichier reçu n'avait pas la bonne durée : il a été écarté.",
   quality_unavailable: "La qualité demandée n'est pas proposée pour cet épisode.",
   network: "La connexion a échoué pendant le téléchargement.",

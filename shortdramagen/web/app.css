@@ -642,6 +642,16 @@ html { scroll-padding-top: 80px; }
 .remedy-note { font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text-2); }
 .film-options summary { cursor: pointer; font-weight: 500; color: var(--text-2); }
 .film-options[open] { display: flex; flex-direction: column; gap: 10px; }
+
+/* ----- Montage ----- */
+.montage-card { display: flex; flex-direction: column; gap: 16px; }
+.montage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 24px; }
+.montage-group { display: flex; flex-direction: column; gap: 10px; }
+.montage-group .form-row { grid-template-columns: 140px minmax(0, 1fr); }
+.passages { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 14px; }
+.passages li { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 0 4px 0 12px; border-radius: 8px; background: var(--s1); }
+.passage-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; color: var(--text-2); }
+.montage-preview { width: 100%; max-width: 270px; aspect-ratio: 9 / 16; border-radius: 8px; background: #000; }
 .side .btn-col { margin-top: 4px; }
 
 /* ----- Réglages ----- */

@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from shortdramagen import cli, errors, film, mp4
@@ -156,8 +157,11 @@ class FfmpegInputsTest(TempDirTest):
         args = film.reencode_args("ffmpeg", plan, self.tmp / "m.txt", graph, self.tmp / "o.mp4", self.tmp)
         self.assertIn("-filter_complex", args)
         long_graph = graph + "null" * 10_000
-        args = film.reencode_args("ffmpeg", plan, self.tmp / "m.txt", long_graph, self.tmp / "o.mp4", self.tmp)
-        self.assertIn("-filter_complex_script", args)
+        # ffmpeg 7 reads a graph file with -/filter_complex; ffmpeg 9 no longer knows -filter_complex_script
+        for major, option in ((9, "-/filter_complex"), (6, "-filter_complex_script")):
+            with self.subTest(ffmpeg=major), mock.patch.object(film, "ffmpeg_major", return_value=major):
+                args = film.reencode_args("ffmpeg", plan, self.tmp / "m.txt", long_graph, self.tmp / "o.mp4", self.tmp)
+                self.assertEqual(args[args.index(option) + 1], str(self.tmp / "filter.txt"))
 
     def test_helpers(self):
         self.assertEqual(film.safe_filename('Qui ? "Moi" : <toi>/lui. '), "Qui Moi toilui")

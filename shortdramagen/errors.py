@@ -18,6 +18,7 @@ URL_REJECTED = "url_rejected"  # the CDN refused the signed URL (expired, invali
 SIZE_MISMATCH = "size_mismatch"  # fewer bytes than announced
 DURATION_MISMATCH = "duration_mismatch"  # MP4 duration differs from the official one
 MP4_UNREADABLE = "mp4_unreadable"  # not an MP4 (HTML page, truncated file…)
+SUBTITLES_UNREADABLE = "subtitles_unreadable"  # the subtitles of a video are not a WebVTT file
 QUALITY_UNAVAILABLE = "quality_unavailable"  # strict quality requested and not offered
 HLS_UNSUPPORTED = "hls_unsupported"  # encrypted stream, or a playlist this engine cannot read
 REMUX_FAILED = "remux_failed"  # ffmpeg could not turn the HLS segments into an MP4
@@ -37,6 +38,13 @@ FILM_EXISTS = "film_exists"
 FILM_DURATION = "film_duration"  # the joined file does not have the expected duration
 FILM_FAILED = "film_failed"  # ffmpeg error
 CANCELLED = "cancelled"
+
+# Montage codes (montage.py, FilmError.code)
+MONTAGE_INVALID = "montage_invalid"  # recipe refused (field in RecipeError.field)
+MONTAGE_EMPTY_EPISODE = "montage_empty_episode"  # the trims and cuts would leave almost nothing
+MONTAGE_ENCODER_UNAVAILABLE = "montage_encoder_unavailable"  # AMF asked for, not working here
+MONTAGE_FORMAT_MISMATCH = "montage_format_mismatch"  # edited episodes that cannot be joined by copy
+MONTAGE_DURATION = "montage_duration"  # an edited episode does not have the expected length
 
 
 class SeriesNotFound(Exception):

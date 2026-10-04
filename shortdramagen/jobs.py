@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import errors, film, fsutil, inputs, pipeline
+from . import errors, film, fsutil, inputs, montage, pipeline
 from .connectivity import Connectivity
 from .events import EventBus
 from .http import TRANSIENT_ERRORS, HttpStatusError
@@ -899,12 +899,23 @@ class JobRunner:
         try:
             ffmpeg = self.find_ffmpeg(self.settings["ffmpeg_path"])
             say = lambda m: self._log(job, m)  # noqa: E731
-            try:
-                made = film.make_film(folder, ffmpeg, log=say, replace=replace is True, **options)
-            except film.FilmError as e:
-                if e.code != errors.FILM_EXISTS or replace != "auto":
-                    raise
-                made = film.make_film(folder, ffmpeg, log=say, replace=True, **options)  # an outdated film is rebuilt
+            if p.get("montage"):  # edited episodes first, then the film (it replaces our plain one)
+
+                def phase(name: str) -> None:
+                    job.progress.started = time.monotonic()  # the time left is estimated per phase
+                    self._set_phase(job, name)
+
+                del options["reencode"]
+                made = montage.make_montage_film(
+                    folder, ffmpeg, log=say, recipe=p.get("montage_recipe"), on_phase=phase, **options
+                )
+            else:
+                try:
+                    made = film.make_film(folder, ffmpeg, log=say, replace=replace is True, **options)
+                except film.FilmError as e:
+                    if e.code != errors.FILM_EXISTS or replace != "auto":
+                        raise
+                    made = film.make_film(folder, ffmpeg, log=say, replace=True, **options)  # an outdated film is rebuilt
         except film.FilmError as e:
             if e.code == errors.CANCELLED or job.stop.is_set():
                 self._stopped(job)

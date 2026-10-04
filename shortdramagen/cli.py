@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
-from . import __version__, errors, film, inputs, pipeline
+from . import __version__, errors, film, inputs, montage, pipeline
 from .providers import registry
 from .http import TRANSIENT_ERRORS, Http, HttpStatusError
 from .inputs import InputError, parse_input
@@ -51,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--allow-missing", action="store_true", help=f"{prefix}fusionne même s'il manque des épisodes")
         p.add_argument("--no-chapters", action="store_true", help=f"{prefix}n'ajoute pas un chapitre par épisode")
         p.add_argument("--replace", action="store_true", help=f"{prefix}remplace un film existant (sinon il est gardé s'il est à jour)")
+        p.add_argument("--montage", action="store_true", help=f"{prefix}applique le montage de la série (sdg montage) avant la fusion")
 
     p_info = sub.add_parser("info", help="affiche les infos de la série, sans rien télécharger")
     common(p_info)
@@ -83,6 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
     ffmpeg_path(p_film)
     p_film.set_defaults(handler=cmd_film)
 
+    add_montage_parser(sub, downloads_dir, ffmpeg_path)
+
     p_ui = sub.add_parser("ui", help="ouvre l'interface web locale : bibliothèque, lecture des épisodes et des films")
     p_ui.add_argument(
         "-o", "--out", type=Path,
@@ -93,6 +97,221 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui.add_argument("--window", action="store_true", help="ouvre une fenêtre d'application (Edge ou Chrome) au lieu d'un onglet")
     p_ui.set_defaults(handler=cmd_ui)
     return parser
+
+
+def add_montage_parser(sub, downloads_dir, ffmpeg_path) -> None:
+    p = sub.add_parser("montage", help="retouche les épisodes (miroir, coupes, look, vitesse) avant le film")
+    msub = p.add_subparsers(dest="montage_command", required=True)
+
+    def target(q: argparse.ArgumentParser) -> None:
+        q.add_argument("target", help="dossier de la série, ou URL / identifiant déjà téléchargé avec fetch")
+        q.add_argument("--lang", help="version à retoucher si plusieurs langues ont été téléchargées")
+        downloads_dir(q)
+
+    q = msub.add_parser("show", help="affiche le montage de la série")
+    target(q)
+    q.set_defaults(handler=cmd_montage_show)
+
+    q = msub.add_parser("set", help="modifie le montage (toute la série, ou un épisode avec -e)")
+    target(q)
+    q.add_argument("-e", "--episode", type=int, help="retouche propre à cet épisode (coupes, passages)")
+    q.add_argument("--mirror", action=argparse.BooleanOptionalAction, help="image retournée gauche-droite")
+    q.add_argument("--keep-subs", action=argparse.BooleanOptionalAction,
+                   help="avec --mirror : garde les sous-titres incrustés lisibles (défaut : oui)")  # fmt: skip
+    q.add_argument("--band", help='zone des sous-titres en %% de la hauteur, ex. "74-84", ou "auto"')
+    q.add_argument("--trim-start", type=seconds, help="secondes retirées au début de chaque épisode (ex. 5, 1:05)")
+    q.add_argument("--trim-end", type=seconds, help="secondes retirées à la fin de chaque épisode")
+    q.add_argument("--speed", type=float, help="vitesse de toute la vidéo (0,5 à 3 ; ex. 1.25)")
+    q.add_argument("--look", choices=list(montage.LOOKS), help="couleurs : " + ", ".join(montage.LOOKS))
+    q.add_argument("--brightness", type=float, help="luminosité (-0,3 à 0,3)")
+    q.add_argument("--contrast", type=float, help="contraste (0,5 à 2)")
+    q.add_argument("--saturation", type=float, help="saturation (0 à 3 ; 0 = noir et blanc)")
+    q.add_argument("--encoder", choices=montage.ENCODERS, help="encodeur (défaut : auto, AMF s'il marche, sinon x264)")
+    q.add_argument("--quality", choices=montage.QUALITIES, help="qualité (défaut : standard)")
+    q.add_argument("--range", dest="ranges", action="append", type=passage, default=[],
+                   help='avec -e : passage accéléré, ex. "0:40-0:55x1.5" (répétable)')  # fmt: skip
+    q.add_argument("--cut", dest="cuts", action="append", type=passage, default=[],
+                   help='avec -e : passage coupé, ex. "1:20-1:32" (répétable)')  # fmt: skip
+    q.add_argument("--clear-ranges", action="store_true", help="avec -e : retire les passages de cet épisode")
+    q.set_defaults(handler=cmd_montage_set)
+
+    q = msub.add_parser("reset", help="supprime le montage (ou la retouche d'un épisode avec -e)")
+    target(q)
+    q.add_argument("-e", "--episode", type=int, help="seulement la retouche propre à cet épisode")
+    q.set_defaults(handler=cmd_montage_reset)
+
+    q = msub.add_parser("preview", help="rend quelques secondes d'un épisode pour juger du résultat")
+    target(q)
+    q.add_argument("-e", "--episode", type=int, default=1, help="épisode (défaut : 1)")
+    q.add_argument("--at", type=seconds, default=0.0, help="à partir de (secondes de l'épisode, ex. 40 ou 0:40)")
+    q.add_argument("--seconds", type=float, default=8.0, help="durée (défaut : 8, au plus 30)")
+    q.add_argument("-f", "--file", type=Path, help="fichier à créer (défaut : <série>/montage/.apercu.mp4)")
+    ffmpeg_path(q)
+    q.set_defaults(handler=cmd_montage_preview)
+
+    q = msub.add_parser("render", help="monte les épisodes sans créer le film (ceux déjà à jour sont gardés)")
+    target(q)
+    q.add_argument("-e", "--episodes", type=parse_episodes, help='épisodes, ex. "1-10,28"')
+    q.add_argument("--force", action="store_true", help="refait aussi les épisodes à jour")
+    ffmpeg_path(q)
+    q.set_defaults(handler=cmd_montage_render)
+
+
+_TIME_RE = re.compile(r"^(?:(\d+):)?(\d+(?:[.,]\d+)?)$")
+_PASSAGE_RE = re.compile(r"^([\d:.,]+)-([\d:.,]+)(?:x([\d.,]+))?$")
+_BAND_RE = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)\s*$")
+
+
+def seconds(text: str) -> float:
+    """argparse type: "90", "1:30", "1:30.5" -> seconds."""
+    m = _TIME_RE.match(text.strip())
+    if not m:
+        raise argparse.ArgumentTypeError(f"durée attendue en secondes ou min:s, pas {text!r}")
+    return int(m.group(1) or 0) * 60 + float(m.group(2).replace(",", "."))
+
+
+def passage(text: str) -> dict:
+    """argparse type: "0:40-0:55x1.5" (accéléré) or "1:20-1:32" (coupé : sans x)."""
+    m = _PASSAGE_RE.match(text.strip())
+    if not m:
+        raise argparse.ArgumentTypeError(f'passage attendu comme "0:40-0:55x1.5" ou "1:20-1:32", pas {text!r}')
+    item = {"from": seconds(m.group(1)), "to": seconds(m.group(2))}
+    if m.group(3):
+        item["speed"] = float(m.group(3).replace(",", "."))
+    return item
+
+
+def _series_dir(args) -> Path:
+    target = Path(args.target)
+    return target if target.is_dir() else film.find_series_dir(args.out, parse_input(args.target), args.lang)
+
+
+def _clock(value: float) -> str:
+    """75.5 -> "1:15.5", 40 -> "40"."""
+    if value < 60:
+        return f"{value:g}"
+    return f"{int(value // 60)}:{value % 60:04.1f}".replace(".0", "")
+
+
+def cmd_montage_show(args, log) -> int:
+    series_dir = _series_dir(args)
+    recipe = montage.load(series_dir)
+    if recipe is None:
+        print(f"Pas de montage pour {series_dir.name}. Exemple : sdg montage set {args.target} --mirror --trim-start 3")
+        return 0
+    print(f"Montage : {montage.describe(recipe)}")
+    for number, ep in sorted(recipe["episodes"].items(), key=lambda kv: int(kv[0])):
+        parts = []
+        if "trim" in ep:
+            names = {"start": "début", "end": "fin"}
+            parts.append(", ".join(f"coupe {v:g} s ({names[k]})" for k, v in ep["trim"].items()))
+        for r in ep.get("ranges", []):
+            parts.append(f"{_clock(r['from'])}-{_clock(r['to'])} " + ("coupé" if r.get("cut") else f"×{r['speed']:g}"))
+        print(f"  Épisode {number} : {', '.join(parts)}")
+    status = montage.status(series_dir)
+    if status["band"]:
+        print(f"Sous-titres  : entre {status['band'][0]:.0%} et {status['band'][1]:.0%} de la hauteur")
+    print(f"Déjà montés  : {status['rendered']} épisode(s), {status['bytes'] / 1e9:.1f} Go ({montage.montage_dir(series_dir)})")
+    print(f"Recette      : {series_dir / montage.RECIPE_FILE}")
+    return 0
+
+
+def cmd_montage_set(args, log) -> int:
+    series_dir = _series_dir(args)
+    recipe = montage.load(series_dir) or montage.validate({})
+    if args.episode is not None:
+        if args.episode < 1:
+            raise InputError("numéro d'épisode attendu (1, 2, …)")
+        series_wide = ("mirror", "keep_subs", "band", "speed", "look", "brightness", "contrast", "saturation", "encoder", "quality")
+        used = [f for f in series_wide if getattr(args, f) is not None]
+        if used:
+            raise InputError(f"--{used[0].replace('_', '-')} vaut pour toute la série : retire -e")
+        if any("speed" not in r for r in args.ranges):
+            raise InputError('--range attend une vitesse, ex. "0:40-0:55x1.5" (pour couper un passage : --cut)')
+        if any("speed" in c for c in args.cuts):
+            raise InputError('--cut ne prend pas de vitesse, ex. "1:20-1:32"')
+        ep = recipe["episodes"].setdefault(str(args.episode), {})
+        trim = {k: v for k, v in (("start", args.trim_start), ("end", args.trim_end)) if v is not None}
+        if trim:
+            ep["trim"] = {**ep.get("trim", {}), **trim}
+        if args.clear_ranges:
+            ep.pop("ranges", None)
+        added = [*args.ranges, *({**c, "cut": True} for c in args.cuts)]
+        if added:
+            ep["ranges"] = [*ep.get("ranges", []), *added]
+        if not ep:
+            recipe["episodes"].pop(str(args.episode))
+    else:
+        if args.ranges or args.cuts or args.clear_ranges:
+            raise InputError("--range, --cut et --clear-ranges s'appliquent à un épisode : ajoute -e N")
+        for arg, key in (("mirror", "mirror"), ("keep_subs", "keep_subtitles"), ("speed", "speed")):
+            if getattr(args, arg) is not None:
+                recipe[key] = getattr(args, arg)
+        if args.band is not None:
+            recipe["subtitle_band"] = _band(args.band)
+        for arg, key in (("trim_start", "start"), ("trim_end", "end")):
+            if getattr(args, arg) is not None:
+                recipe["trim"][key] = getattr(args, arg)
+        if args.look is not None:
+            recipe["look"] = {"preset": args.look}
+        for key in montage.LOOK_LIMITS:
+            if getattr(args, key) is not None:
+                recipe["look"][key] = getattr(args, key)
+        for key in ("encoder", "quality"):
+            if getattr(args, key) is not None:
+                recipe["render"][key] = getattr(args, key)
+    recipe = montage.save(series_dir, recipe)
+    print(f"Montage : {montage.describe(recipe)}")
+    return 0
+
+
+def _band(text: str):
+    if text.strip() == "auto":
+        return "auto"
+    m = _BAND_RE.match(text)
+    if not m:
+        raise InputError('--band attend "auto" ou deux pourcentages, ex. "74-84"')
+    return [float(m.group(i).replace(",", ".")) / 100 for i in (1, 2)]
+
+
+def cmd_montage_reset(args, log) -> int:
+    series_dir = _series_dir(args)
+    recipe = montage.load(series_dir)
+    if recipe is None:
+        print("Pas de montage à supprimer.")
+    elif args.episode is not None:
+        recipe["episodes"].pop(str(args.episode), None)
+        print(f"Montage : {montage.describe(montage.save(series_dir, recipe))}")
+    else:
+        (series_dir / montage.RECIPE_FILE).unlink()
+        print(f"Montage supprimé. Les épisodes déjà montés restent dans {montage.montage_dir(series_dir)}.")
+    return 0
+
+
+def cmd_montage_preview(args, log) -> int:
+    if not 0 < args.seconds <= 30:
+        raise InputError("--seconds : entre 1 et 30")
+    series_dir = _series_dir(args)
+    ffmpeg = film.find_ffmpeg(args.ffmpeg)
+    print(montage.preview(series_dir, args.episode, args.at, args.seconds, ffmpeg, output=args.file, log=log))
+    return 0
+
+
+def cmd_montage_render(args, log) -> int:
+    series_dir = _series_dir(args)
+    recipe = montage.load(series_dir)
+    if recipe is None:
+        raise film.FilmError("Pas de montage pour cette série : crée-le d'abord (sdg montage set …).", errors.MONTAGE_INVALID)
+    only = {n for a, b in args.episodes for n in range(a, (b or 9999) + 1)} if args.episodes else None
+    plan = film.plan_film(series_dir, True, only)
+    ffmpeg = film.find_ffmpeg(args.ffmpeg)
+    progress = _ProgressPrinter()
+    try:
+        report, _ = montage.render_series(series_dir, recipe, ffmpeg, plan.parts, log, progress, force=args.force)
+    finally:
+        progress.finish()
+    log(f"Terminé : {len(report.rendered)} épisode(s) monté(s), {len(report.reused)} déjà à jour.")
+    return 0
 
 
 def port_number(text: str) -> int:
@@ -146,8 +365,10 @@ def cmd_info(args, log) -> int:
     total_ms = series.total_duration_ms
     if total_ms:
         print(f"Durée totale : {film.format_duration(total_ms / 1000)}")
-    print(f"Gratuits     : {len(free)} sur le site officiel (épisodes {free[0]}-{free[-1]})" if free else "Gratuits     : aucun")
-    print(f"Langues      : {', '.join(series.languages)}")
+    if free:
+        print(f"Gratuits     : {len(free)} sur le site officiel (épisodes {free[0]}-{free[-1]})")
+    if series.languages:
+        print(f"Langues      : {', '.join(series.languages)}")
     if series.introduction:
         print(f"\n{series.introduction}")
     if not preview.available:
@@ -155,7 +376,8 @@ def cmd_info(args, log) -> int:
     elif series.free_only:
         print("\nSource       : site officiel, épisodes gratuits seulement")
     else:
-        print(f"\nSource       : OK (dernier épisode dispo en {', '.join(preview.qualities)})")
+        offered = f" en {', '.join(preview.qualities)}" if preview.qualities else ""
+        print(f"\nSource       : OK (dernier épisode dispo{offered})")
     return 0
 
 
@@ -185,7 +407,7 @@ def cmd_fetch(args, log) -> int:
         selected = set(result.done + result.skipped) if args.episodes else None
         _make_film(
             result.series_dir, ffmpeg, log, reencode=args.reencode, allow_missing=args.allow_missing,
-            chapters=not args.no_chapters, only=selected, replace=args.replace,
+            chapters=not args.no_chapters, only=selected, replace=args.replace, with_montage=args.montage,
         )  # fmt: skip
     return 1 if result.failed else 0
 
@@ -199,13 +421,19 @@ def cmd_film(args, log) -> int:
     _make_film(
         series_dir, film.find_ffmpeg(args.ffmpeg), log, output=args.file, reencode=args.reencode,
         allow_missing=args.allow_missing, chapters=not args.no_chapters, replace=args.replace,
+        with_montage=args.montage,
     )  # fmt: skip
     return 0
 
 
-def _make_film(series_dir: Path, ffmpeg: str, log, **options) -> film.FilmResult:
+def _make_film(series_dir: Path, ffmpeg: str, log, with_montage: bool = False, **options) -> film.FilmResult:
     progress = _ProgressPrinter()
     try:
+        if with_montage:
+            if options.pop("reencode", False):
+                raise InputError("--montage et --reencode ne vont pas ensemble : le montage ré-encode déjà chaque épisode")
+            options.pop("replace", None)  # the montage film replaces our own film in any case
+            return montage.make_montage_film(series_dir, ffmpeg, log, on_progress=progress, **options)
         return film.make_film(series_dir, ffmpeg, log, on_progress=progress, **options)
     finally:
         progress.finish()

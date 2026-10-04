@@ -1,10 +1,16 @@
-"""Signed video URLs from dramafren's JSON API.
+"""Signed video URLs from dramafren's JSON APIs (DramaBox and GoodShort).
 
-The player page calls ``cdn-dramabox.dramafren.org/index.php?action=get_video``
+DramaBox: the player page calls ``cdn-dramabox.dramafren.org/index.php?action=get_video``
 (found in the HAR captures). Unlike the HTML pages, this endpoint is not behind
 the Cloudflare challenge and needs no cookie. ``lang`` does not change the
 video (the dubbed versions have their own book id), ``sv=1`` is the only
 server that answers for DramaBox.
+
+GoodShort: the player calls ``index.php?action=get_video_url`` with the book id
+and the official chapter id (``chap_id``). ``cdn-goodshort.dramafren.org`` serves
+the same application without the challenge. Each quality is an HLS playlist
+behind dramafren's ``/proxy?token=…``, whose segments go through the proxy too.
+See docs/05-plateformes.md.
 """
 
 from __future__ import annotations
@@ -20,6 +26,11 @@ ENDPOINTS = (
     "https://cdn-dramaboxv2.dramafren.org/index.php",  # fallback used by the site itself
 )
 _HEADERS = {"Origin": "https://dramabox.dramafren.org", "Referer": "https://dramabox.dramafren.org/"}
+
+GOODSHORT_ENDPOINT = "https://cdn-goodshort.dramafren.org/index.php"
+GOODSHORT_SERVERS = (1, 2, 3)  # the player's "Server-1/2/3"; the next one is tried when one says no
+GOODSHORT_TIMEOUT_S = 60.0  # about 3 s usually, but 30 s or more for the first episode of a series
+_GOODSHORT_HEADERS = {"Referer": "https://cdn-goodshort.dramafren.org/"}
 
 
 ResolveError = errors.ResolveError  # shared by every platform
@@ -57,4 +68,37 @@ def parse_video_payload(data: dict) -> list[VideoSource]:
     main = data["videoUrl"]
     if main not in sources:
         sources[main] = VideoSource(main, quality_from_text(main), "dramafren")
+    return sorted(sources.values(), key=lambda s: s.height, reverse=True)
+
+
+def get_goodshort_video(http: Http, book_id: str, chapter_id: str, lang: str = "en") -> list[VideoSource]:
+    """All qualities of one GoodShort episode (HLS playlists), best first.
+
+    An unknown or locked chapter answers ``{"status": "error", "video_url": ""}``:
+    the next server is asked. A network error ends the search, since every
+    server is behind the same host.
+    """
+    problems = []
+    for server in GOODSHORT_SERVERS:
+        query = urlencode({"action": "get_video_url", "id": book_id, "chap_id": chapter_id, "sv": server, "lang": lang})
+        try:
+            data = http.get_json(f"{GOODSHORT_ENDPOINT}?{query}", _GOODSHORT_HEADERS, GOODSHORT_TIMEOUT_S)
+        except (HttpStatusError, ValueError, *TRANSIENT_ERRORS) as e:
+            raise ResolveError(f"pas de réponse utilisable de dramafren ({e})", errors.NETWORK) from None
+        if isinstance(data, dict) and data.get("status") == "success" and data.get("video_url"):
+            return parse_goodshort_payload(data)
+        problems.append(f"serveur {server} : {(data.get('status') if isinstance(data, dict) else None) or 'réponse invalide'}")
+    raise ResolveError(f"Épisode indisponible sur dramafren ({'; '.join(problems)})", errors.EP_UNAVAILABLE)
+
+
+def parse_goodshort_payload(data: dict) -> list[VideoSource]:
+    """``qualities``: [{"quality": "1080P", "url": …}, …]; ``video_url`` is the one played first (720P)."""
+    sources: dict[str, VideoSource] = {}
+    for q in data.get("qualities") or []:
+        url = q.get("url") if isinstance(q, dict) else None
+        if url:
+            sources[url] = VideoSource(url, quality_from_text(q.get("quality", "")), "dramafren", "hls")
+    main = data["video_url"]
+    if main not in sources:
+        sources[main] = VideoSource(main, "", "dramafren", "hls")
     return sorted(sources.values(), key=lambda s: s.height, reverse=True)

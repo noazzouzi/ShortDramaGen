@@ -9,6 +9,7 @@ const PHASES = {
   downloading: "Téléchargement",
   finishing: "Vérifications finales…",
   merging: "Création du film…",
+  rendering: "Montage des épisodes…",
 };
 
 function eta(seconds) {
@@ -56,7 +57,8 @@ function jobRow(ctx, job, confirmCancel, setConfirm) {
   let tone = "active";
   if (job.kind === "film") {
     fraction = p?.seconds_total ? p.seconds_done / p.seconds_total : 0;
-    lines.push(p?.seconds_total ? `Création du film · ${Math.round(fraction * 100)} %` : PHASES.merging);
+    const what = job.phase === "rendering" ? "Montage des épisodes" : "Création du film";
+    lines.push(p?.seconds_total ? `${what} · ${Math.round(fraction * 100)} %` : PHASES[job.phase] || PHASES.merging);
     if (p?.eta_s !== undefined && p?.eta_s !== null) lines.push(eta(p.eta_s));
   } else if (job.status === "running" && p?.episodes && job.phase === "downloading") {
     const e = p.episodes;

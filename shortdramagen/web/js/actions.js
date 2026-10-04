@@ -100,7 +100,7 @@ export function makeActions(ctx) {
         }
         return queued(res.data.job, "Création du film");
       } catch (err) {
-        if (err instanceof ApiError && ["film_exists", "film_missing_episodes", "film_mixed_formats", "ffmpeg_missing", "no_episodes"].includes(err.code)) {
+        if (err instanceof ApiError && ["film_exists", "film_missing_episodes", "film_mixed_formats", "ffmpeg_missing", "no_episodes", "montage_invalid", "invalid_input"].includes(err.code)) {
           throw err;
         }
         return fail(err);

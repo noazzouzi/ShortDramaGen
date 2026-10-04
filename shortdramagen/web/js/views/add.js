@@ -24,6 +24,11 @@ export function parseRanges(text, max) {
   return out;
 }
 
+// La source ne propose qu'une qualité, non annoncée (FlickReels) : rien à choisir.
+function siteQuality(preview) {
+  return preview.free_only || (preview.availability?.source === "ok" && !preview.availability.qualities?.length);
+}
+
 function estimateFor(preview, quality, count) {
   const full = preview.estimate?.["1080p"]?.bytes;
   if (!full || !preview.episode_count) return null;
@@ -242,12 +247,12 @@ export function openAddDialog(ctx, { input = "", lang = null } = {}) {
     );
     const modeRadio = (value, label) =>
       h("label", { class: "radio-inline" }, h("input", { type: "radio", name: "ajout-episodes", value, checked: st.mode === value, onchange: () => { st.mode = value; update(); } }), label);
-    const command = ["python -m shortdramagen fetch", p.ref, p.is_original ? "" : `--lang ${p.lang}`, st.quality !== "best" ? `-q ${st.quality}` : "",
+    const command = ["python -m shortdramagen fetch", p.ref, p.is_original ? "" : `--lang ${p.lang}`, !siteQuality(p) && st.quality !== "best" ? `-q ${st.quality}` : "",
       st.mode === "choose" && st.chosen.size ? `-e ${ranges([...st.chosen]).replace(/ /g, "")}` : "", st.filmAfter ? "--film" : ""].filter(Boolean).join(" ");
     return h(
       "div",
       { class: "add-options" },
-      p.free_only ? null : h("label", { class: "form-row" }, h("span", { text: "Qualité" }), h("span", { class: "select" }, qualitySelect)),
+      siteQuality(p) ? null : h("label", { class: "form-row" }, h("span", { text: "Qualité" }), h("span", { class: "select" }, qualitySelect)),
       h("div", { class: "form-row" }, h("span", { text: "Épisodes" }), h("div", { class: "radio-row-inline" }, modeRadio("all", "Tous"), modeRadio("choose", "Choisir…"))),
       st.mode === "choose" ? h("div", { class: "picker" }, episodePicker(p.episode_count || 0)) : null,
       h("p", { class: "note" }, "Dossier : ", h("span", { class: "mono", text: ctx.state.health?.downloads_dir || "" }), " (modifiable dans les Réglages)"),
@@ -280,7 +285,7 @@ export function openAddDialog(ctx, { input = "", lang = null } = {}) {
           !available
             ? p.free_only ? `Aucun épisode gratuit sur le site ${p.provider_label}.` : "La source ne répond pas pour cette série : le téléchargement risque d'échouer."
             : p.free_only ? `Site officiel ${p.provider_label} · ${plural((p.free_episodes || []).length, "épisode gratuit", "épisodes gratuits")}`
-            : `Source disponible · ${(p.availability.qualities || []).join(", ")}`,
+            : p.availability.qualities?.length ? `Source disponible · ${p.availability.qualities.join(", ")}` : "Source disponible",
         ),
       ),
     );
@@ -332,7 +337,7 @@ export function openAddDialog(ctx, { input = "", lang = null } = {}) {
   }
 
   function summaryLine(p) {
-    const qualityLabel = p.free_only ? "Qualité du site" : st.quality === "best" ? `Meilleure (${p.availability?.qualities?.[0] || "1080p"})` : st.quality;
+    const qualityLabel = siteQuality(p) ? "Qualité du site" : st.quality === "best" ? `Meilleure (${p.availability?.qualities?.[0] || "1080p"})` : st.quality;
     const episodes = st.mode === "choose" ? plural(st.chosen.size, "épisode choisi", "épisodes choisis") : "tous les épisodes";
     return h(
       "button",
@@ -418,7 +423,7 @@ export function openAddDialog(ctx, { input = "", lang = null } = {}) {
     return {
       label,
       run: async () => Boolean(await ctx.act.addFetch({
-        input: st.input, lang: p.is_original ? null : p.lang, quality: st.quality,
+        input: st.input, lang: p.is_original ? null : p.lang, quality: siteQuality(p) ? "best" : st.quality,
         episodes: st.mode === "choose" ? [...st.chosen].sort((a, b) => a - b) : null, film_after: st.filmAfter,
       })),
       secondary: st.mode === "all" && p.episode_count ? { label: "Choisir les épisodes", run: () => { st.mode = "choose"; st.expanded = true; update(); return false; } } : null,

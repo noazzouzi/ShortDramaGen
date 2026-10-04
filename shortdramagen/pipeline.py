@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import errors, hls
-from .download import IntegrityError, UrlRejected, check_duration, download, download_cover
+from .download import IntegrityError, UrlRejected, check_duration, download, download_cover, download_subtitles
 from .http import TRANSIENT_ERRORS, Http, HttpStatusError
 from .inputs import EpisodeRanges
 from .manifest import Listener, Manifest, now_iso
@@ -122,7 +122,7 @@ class Preview:
 
     def estimated_bytes(self) -> dict[str, int]:
         # Only DramaBox 1080p has a measured basis; other qualities and platforms are not estimated.
-        if self.series.free_only:
+        if self.series.provider != DEFAULT_PROVIDER or self.series.free_only:
             return {}
         return {"1080p": self.series.episode_count * BYTES_PER_EPISODE_1080P}
 
@@ -508,11 +508,17 @@ def download_source(
     on_progress: Callable[[int, int], None] | None = None,
     ffmpeg_path: str | None = None,
 ) -> int:
-    """One episode from one source: a single MP4, or an HLS playlist remuxed into an MP4."""
+    """One episode from one source: a single MP4, or an HLS playlist remuxed into an MP4.
+
+    The source's subtitles (E001.fr.vtt) come first: a later run skips an episode whose video is there.
+    """
+    if source.subtitles:
+        download_subtitles(http, source.subtitles, dest.with_name(f"{dest.stem}.{series.lang or 'und'}.vtt"))
     if source.kind == "hls":
         return hls.download_hls(
-            http, source.url, dest, ep.duration_ms, on_progress, series.duration_tolerance_s, ffmpeg_path=ffmpeg_path
-        )
+            http, source.url, dest, ep.duration_ms, on_progress, series.duration_tolerance_s,
+            ffmpeg_path=ffmpeg_path, rendition=source.quality,
+        )  # fmt: skip
     return download(http, source.url, dest, ep.duration_ms, on_progress, series.duration_tolerance_s)
 
 

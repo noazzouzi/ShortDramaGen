@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .. import desktop, errors, film, inputs, pipeline
+from .. import desktop, errors, film, inputs, montage, pipeline
 from ..download import download_cover
 from ..events import Event
 from ..http import TRANSIENT_ERRORS, HttpStatusError
@@ -383,6 +383,8 @@ def film_job(app: "App", key: str, data: dict):
         "output_name": output_name(data.get("output_name")),
         "replace": flag(data, "replace"),
     }
+    if flag(data, "montage"):
+        return _montage_film_job(app, key, summary, folder, params)
     try:  # the same checks as the job, at once: the interface shows the right fix immediately
         app.runner.find_ffmpeg(app.settings["ffmpeg_path"])
         plan = film.plan_film(folder, params["allow_missing"])
@@ -398,6 +400,101 @@ def film_job(app: "App", key: str, data: dict):
     job = app.runner.create_film(key, summary["book_id"], version_lang(summary), params,
                                  title=summary["title"], cover_url=summary["cover_url"], provider=summary["provider"])  # fmt: skip
     return created(app, job)
+
+
+def _montage_film_job(app: "App", key: str, summary: dict, folder: Path, params: dict):
+    """A film of edited episodes. The recipe is frozen in the job: editing it meanwhile changes nothing."""
+    if params["reencode"]:
+        raise ApiError(422, "invalid_input", "Le montage ré-encode déjà chaque épisode : pas de « reencode ».", {"field": "reencode"})
+    try:
+        app.runner.find_ffmpeg(app.settings["ffmpeg_path"])
+        recipe = montage.load(folder)
+        if recipe is None:
+            raise montage.RecipeError("", "Pas de montage pour cette série : règle-le d'abord.")
+        film.plan_film(folder, params["allow_missing"])
+    except film.FilmError as e:
+        raise ApiError(_FILM_STATUS.get(e.code, 422), e.code, str(e)) from None
+    params = {**params, "montage": True, "montage_recipe": recipe}
+    job = app.runner.create_film(key, summary["book_id"], version_lang(summary), params,
+                                 title=summary["title"], cover_url=summary["cover_url"], provider=summary["provider"])  # fmt: skip
+    return created(app, job)
+
+
+# --- montage ------------------------------------------------------------------------------------
+
+PREVIEW_MAX_S = 15.0
+
+
+def montage_state(app: "App", key: str) -> dict:
+    folder = _folder(app, key)
+    try:
+        recipe, error = montage.load(folder), None
+    except montage.RecipeError as e:  # a hand-edited montage.json: shown, not lost
+        recipe, error = None, str(e)
+    status = montage.status(folder)
+    return {
+        "recipe": recipe,
+        "error": error,
+        "summary": montage.describe(recipe) if recipe else None,
+        "defaults": montage.DEFAULT,
+        "looks": list(montage.LOOKS),
+        "encoders": list(montage.ENCODERS),
+        "qualities": list(montage.QUALITIES),
+        "rendered": status["rendered"],
+        "rendered_bytes": status["bytes"],
+        "band": list(status["band"]) if status["band"] else None,
+        "path": str(folder / montage.RECIPE_FILE),
+    }
+
+
+def get_montage(app: "App", req: "Request", key: str):
+    return json_reply(montage_state(app, key))
+
+
+def put_montage(app: "App", req: "Request", key: str):
+    folder = _folder(app, key)
+    try:
+        montage.save(folder, body(req))
+    except montage.RecipeError as e:
+        raise ApiError(422, "invalid_input", str(e), {"field": e.field}) from None
+    return json_reply(montage_state(app, key))
+
+
+def delete_montage(app: "App", req: "Request", key: str):
+    (_folder(app, key) / montage.RECIPE_FILE).unlink(missing_ok=True)
+    return json_reply(montage_state(app, key))
+
+
+def _number(data: dict, name: str, default: float, low: float, high: float) -> float:
+    value = data.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+        raise ApiError(422, "invalid_input", f"« {name} » : nombre entre {low:g} et {high:g} attendu.", {"field": name})
+    return float(value)
+
+
+def montage_preview(app: "App", req: "Request", key: str):
+    """A few seconds rendered now (1 to 3 s): the request waits for it."""
+    folder = _folder(app, key)
+    busy = app.runner.busy(key)
+    if busy:
+        raise ApiError(409, "series_busy", "Attends la fin de la tâche en cours sur cette série.", {"job_id": busy.id})
+    data = body(req)
+    number = int(_number(data, "episode", 1, 1, 9999))
+    at = _number(data, "at", 0, 0, 36_000)
+    seconds = _number(data, "seconds", 8, 1, PREVIEW_MAX_S)
+    try:
+        ffmpeg = app.runner.find_ffmpeg(app.settings["ffmpeg_path"])
+        path = montage.preview(folder, number, at, seconds, ffmpeg, log=lambda _: None)
+    except film.FilmError as e:
+        raise ApiError(_FILM_STATUS.get(e.code, 422), e.code, str(e), {"field": getattr(e, "field", None)}) from None
+    return json_reply({"media_url": f"/media/series/{key}/montage/preview?v={path.stat().st_mtime_ns}"})
+
+
+def montage_preview_file(app: "App", key: str) -> Path:
+    path = montage.montage_dir(_folder(app, key)) / montage.PREVIEW_FILE
+    if not path.is_file():
+        raise ApiError(404, "not_found", "Pas d'aperçu : lance-le d'abord.")
+    return path
 
 
 # --- files: open, ignore, delete, restore -------------------------------------------------------

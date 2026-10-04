@@ -34,7 +34,8 @@ from .pipeline import COVER_FILE
 from .providers import registry
 
 # "<id>-<slug>" (DramaBox) or "<platform>-<id>-<slug>" (pipeline.series_dir_name)
-KEY_RE = re.compile(r"^(?:[a-z][a-z0-9]{1,19}-)?\d{6,20}-[a-z0-9][a-z0-9._-]{0,159}$")
+# DramaBox folders: "{id}-{slug}"; other platforms: "{platform}-{id}-{slug}", with shorter ids (flickreels-9561-…)
+KEY_RE = re.compile(r"^(?:[a-z][a-z0-9]{1,19}-\d{1,20}|\d{6,20})-[a-z0-9][a-z0-9._-]{0,159}$")
 _EPISODE_FILE_RE = re.compile(r"^E(\d{3,4})\.mp4$")
 _PART_FILE_RE = re.compile(r"^E(\d{3,4})\..*\.part$")
 _URL_RE = re.compile(r"\b(?:https?|ftp)://\S+", re.IGNORECASE)
@@ -311,6 +312,8 @@ def describe_film(key: str, data: dict, files: DirContents, episodes: list[dict]
         "chapters": record.get("chapters") if isinstance(record.get("chapters"), int) else 0,
         "duration_s": record.get("duration_s"),
         "created_at": record.get("created_at"),
+        # a film of edited episodes (montage): what was done, as text
+        "montage": clean_text((record.get("edit") or {}).get("summary")) if isinstance(record.get("edit"), dict) else None,
     }
     if not film_name_ok(name):
         return {**out, "state": "outside"}  # created elsewhere with -f: never served

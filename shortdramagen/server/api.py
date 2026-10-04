@@ -96,6 +96,10 @@ def media_preview_cover(app: "App", req: "Request", ref: str, lang: str):
     return _file(actions.preview_cover(app, ref, lang), "image/jpeg", req, cache="private, max-age=86400")
 
 
+def media_montage_preview(app: "App", req: "Request", key: str):
+    return _file(actions.montage_preview_file(app, key), "video/mp4", req)
+
+
 # --- routing -----------------------------------------------------------------------------
 
 Handler = Callable[..., object]
@@ -111,6 +115,8 @@ ROUTES: list[tuple[re.Pattern, dict[str, Handler]]] = [
     (re.compile(rf"^/api/series/{_KEY}/redownload$"), {"POST": actions.redownload}),
     (re.compile(rf"^/api/series/{_KEY}/film/plan$"), {"GET": actions.film_plan}),
     (re.compile(rf"^/api/series/{_KEY}/film$"), {"POST": actions.create_film}),
+    (re.compile(rf"^/api/series/{_KEY}/montage$"), {"GET": actions.get_montage, "PUT": actions.put_montage, "DELETE": actions.delete_montage}),
+    (re.compile(rf"^/api/series/{_KEY}/montage/preview$"), {"POST": actions.montage_preview}),
     (re.compile(rf"^/api/series/{_KEY}/open$"), {"POST": actions.open_target}),
     (re.compile(rf"^/api/series/{_KEY}/ignore$"), {"POST": actions.ignore}),
     (re.compile(r"^/api/trash/(?P<trash_id>[^/]+)/restore$"), {"POST": actions.restore}),
@@ -125,7 +131,8 @@ ROUTES: list[tuple[re.Pattern, dict[str, Handler]]] = [
     (re.compile(rf"^/media/series/{_KEY}/film$"), {"GET": media_film}),
     (re.compile(rf"^/media/series/{_KEY}/film/chapters\.vtt$"), {"GET": media_chapters}),
     (re.compile(rf"^/media/series/{_KEY}/cover$"), {"GET": media_cover}),
-    (re.compile(r"^/media/preview/(?P<ref>(?:[a-z]+:)?\d{6,20})/(?P<lang>[a-z]{2,3}|vo)/cover$"), {"GET": media_preview_cover}),
+    (re.compile(rf"^/media/series/{_KEY}/montage/preview$"), {"GET": media_montage_preview}),
+    (re.compile(r"^/media/preview/(?P<ref>[a-z][a-z0-9]*:\d{1,20}|\d{6,20})/(?P<lang>[a-z]{2,3}|vo)/cover$"), {"GET": media_preview_cover}),
 ]
 
 

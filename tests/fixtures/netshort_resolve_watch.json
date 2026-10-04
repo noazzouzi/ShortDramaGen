@@ -1,0 +1,18 @@
+{
+ "ok": true,
+ "server": 1,
+ "videoUrl": "https://ns-aws-cdn.netshort.com/oIZqEdxbfAQqM6wqNvhCAof2EEEQAQF4xyKufD?a=0&auth_key=1791358483-1bc09a44c5114b92b4de82edec8c670d-0-8d62ad3f911840f4c30936d113d47cb2&br=772&bt=772&cd=0%7C0%7C0&ch=0&cr=0&cs=0&cv=1&dr=0&ds=6&eid=3f2774c9ceec48388871a65623212218&er=0&l=20260927073248AF4AC508ABEFDAFD2BDE&lr=&mime_type=video_mp4&net=0&pl=0&qs=0&rc=and4M3c5cjlmZDozMzZoNEApNDU1NThkOjs2N2hmZjo1NmdkZGctMmRzNXBhMi1kXjVzczUvLjAzMy41NTVgYjYxNGM6Yw%3D%3D&vl=&vr=",
+ "qualities": [
+  {
+   "quality": "Default",
+   "url": "https://ns-aws-cdn.netshort.com/oIZqEdxbfAQqM6wqNvhCAof2EEEQAQF4xyKufD?a=0&auth_key=1791358483-1bc09a44c5114b92b4de82edec8c670d-0-8d62ad3f911840f4c30936d113d47cb2&br=772&bt=772&cd=0%7C0%7C0&ch=0&cr=0&cs=0&cv=1&dr=0&ds=6&eid=3f2774c9ceec48388871a65623212218&er=0&l=20260927073248AF4AC508ABEFDAFD2BDE&lr=&mime_type=video_mp4&net=0&pl=0&qs=0&rc=and4M3c5cjlmZDozMzZoNEApNDU1NThkOjs2N2hmZjo1NmdkZGctMmRzNXBhMi1kXjVzczUvLjAzMy41NTVgYjYxNGM6Yw%3D%3D&vl=&vr="
+  }
+ ],
+ "subtitles": [
+  {
+   "subtitleLanguage": "fr_FR",
+   "url": "https://ns-aws-cdn.netshort.com/523b6625baa0417aa81c95193eeec73f?auth_key=1791707082-dcc7be71f05b477eb32f77486db568a5-0-79a15c35dd91058195a49db56098c142&mime_type=text_plain"
+  }
+ ],
+ "source": "Primary"
+}

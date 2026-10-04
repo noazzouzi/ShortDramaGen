@@ -107,13 +107,16 @@ def download_hls(
     tolerance_s: float = DURATION_TOLERANCE_S,
     remux: Remux | None = None,
     ffmpeg_path: str | None = None,
+    rendition: str = "",
 ) -> int:
     """Download the episode behind ``url`` into ``dest`` (an MP4) and return its size.
 
     Without announced duration, the playlist's own total is checked instead.
+    ``rendition`` (the quality) tells apart playlists whose URLs share a name
+    (dramafren's ``/proxy?token=…``), so a resume never mixes two qualities.
     """
     playlist = load_playlist(http, url)
-    name = Path(urlparse(url).path).stem or "video"
+    name = ".".join(filter(None, (Path(urlparse(url).path).stem or "video", rendition)))
     ts = dest.with_name(f"{dest.stem}.{name}.ts.part")
     idx = dest.with_name(f"{dest.stem}.{name}.idx.part")
     mp4_part = dest.with_name(f"{dest.stem}.{name}.mp4.part")

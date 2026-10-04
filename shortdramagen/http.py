@@ -55,18 +55,34 @@ class Http:
         self.retries = retries
         self.backoff = backoff
 
-    def _request(self, url: str, headers: Mapping[str, str] | None) -> urllib.request.Request:
+    def _request(
+        self, url: str, headers: Mapping[str, str] | None, data: bytes | None = None
+    ) -> urllib.request.Request:
         h = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
         h.update(headers or {})
-        return urllib.request.Request(url, headers=h)
+        return urllib.request.Request(url, data=data, headers=h)
 
-    def get(self, url: str, headers: Mapping[str, str] | None = None) -> Response:
-        """GET with retries on network errors and 5xx. 4xx raise immediately."""
+    def get(self, url: str, headers: Mapping[str, str] | None = None, timeout: float | None = None) -> Response:
+        """GET with retries on network errors and 5xx. 4xx raise immediately.
+
+        ``timeout``: for a slow source, instead of the client's own.
+        """
+        return self._send(url, headers, timeout=timeout)
+
+    def post_json(self, url: str, payload, headers: Mapping[str, str] | None = None):
+        """POST a JSON body and read the JSON answer, with the same retries as GET (read-only APIs only)."""
+        h = {"Content-Type": "application/json", "Accept": "application/json"}
+        h.update(headers or {})
+        return self._send(url, h, json.dumps(payload).encode("utf-8")).json()
+
+    def _send(
+        self, url: str, headers: Mapping[str, str] | None, data: bytes | None = None, timeout: float | None = None
+    ) -> Response:
         attempt = 0
         while True:
             attempt += 1
             try:
-                with urllib.request.urlopen(self._request(url, headers), timeout=self.timeout) as r:
+                with urllib.request.urlopen(self._request(url, headers, data), timeout=timeout or self.timeout) as r:
                     return Response(r.geturl(), r.status, dict(r.headers.items()), r.read())
             except urllib.error.HTTPError as e:
                 body = e.read() if e.fp else b""
@@ -77,10 +93,10 @@ class Http:
                     raise
             time.sleep(self.backoff * 2 ** (attempt - 1))
 
-    def get_json(self, url: str, headers: Mapping[str, str] | None = None):
+    def get_json(self, url: str, headers: Mapping[str, str] | None = None, timeout: float | None = None):
         h = {"Accept": "application/json"}
         h.update(headers or {})
-        return self.get(url, h).json()
+        return self.get(url, h, timeout).json()
 
     @contextmanager
     def stream(

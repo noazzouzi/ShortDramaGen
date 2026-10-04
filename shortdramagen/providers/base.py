@@ -7,7 +7,9 @@ registering it in ``registry``, nothing else.
 
 from __future__ import annotations
 
+import re
 import threading
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
@@ -44,8 +46,9 @@ class Provider:
     id_pattern = r"\d{8,14}"  # a series id, as typed after "name:"
     example_link = ""
 
-    def handles(self, host: str) -> bool:
-        return any(host == h or host.endswith("." + h) for h in self.hosts)
+    def claim(self, host: str) -> int:
+        """How precisely this platform claims a link host: length of the matching entry of ``hosts``, 0 if none."""
+        return max((len(h) for h in self.hosts if host == h or host.endswith("." + h)), default=0)
 
     def parse_link(self, parsed: ParseResult) -> BookRef | None:
         """The series a link of this platform points at, or None if it is not a series link."""
@@ -83,6 +86,12 @@ class Provider:
     def expires_at(self, url: str) -> datetime | None:
         """When a signed video URL stops working, if the URL says so."""
         return None
+
+
+def ascii_slug(text: str) -> str:
+    """Folder names stay ASCII (library.KEY_RE): "engagée-à-un-milliardaire" -> "engagee-a-un-milliardaire"."""
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
 def free_sources(series: Series, ep: Episode, origin: str = "official") -> list[VideoSource]:

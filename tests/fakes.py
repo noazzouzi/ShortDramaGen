@@ -121,7 +121,7 @@ class FakeHttp:
                 return table[prefix]
         raise HttpStatusError(url, 404)
 
-    def get(self, url, headers=None):
+    def get(self, url, headers=None, timeout=None):
         self.calls.append((url, dict(headers or {})))
         answer = self._lookup(self.pages, url)
         if callable(answer):
@@ -133,8 +133,18 @@ class FakeHttp:
         body = answer if isinstance(answer, bytes) else answer.encode("utf-8")
         return Response(url, 200, {}, body)
 
-    def get_json(self, url, headers=None):
-        return self.get(url, headers).json()
+    def get_json(self, url, headers=None, timeout=None):
+        return self.get(url, headers, timeout).json()
+
+    def post_json(self, url, payload, headers=None):
+        """Same table as GET; a callable answer receives the payload instead of the URL."""
+        self.calls.append((url, dict(headers or {})))
+        answer = self._lookup(self.pages, url)
+        if callable(answer):
+            answer = answer(payload)
+        if isinstance(answer, int):
+            raise HttpStatusError(url, answer)
+        return json.loads(json.dumps(answer))
 
     @contextmanager
     def stream(self, url, headers=None):
