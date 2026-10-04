@@ -100,7 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def add_montage_parser(sub, downloads_dir, ffmpeg_path) -> None:
-    p = sub.add_parser("montage", help="retouche les épisodes (miroir, coupes, look, vitesse) avant le film")
+    p = sub.add_parser("montage", help="retouche les épisodes (miroir, coupes, look, vitesse, effets) avant le film")
     msub = p.add_subparsers(dest="montage_command", required=True)
 
     def target(q: argparse.ArgumentParser) -> None:
@@ -126,6 +126,21 @@ def add_montage_parser(sub, downloads_dir, ffmpeg_path) -> None:
     q.add_argument("--brightness", type=float, help="luminosité (-0,3 à 0,3)")
     q.add_argument("--contrast", type=float, help="contraste (0,5 à 2)")
     q.add_argument("--saturation", type=float, help="saturation (0 à 3 ; 0 = noir et blanc)")
+    q.add_argument("--effects", action=argparse.BooleanOptionalAction,
+                   help="--no-effects coupe tous les effets ci-dessous ; --effects les remet à leur valeur par défaut")  # fmt: skip
+    q.add_argument("--zoom", type=float, help="zoom au centre, en %% (0 à 15 ; défaut : 4)")
+    q.add_argument("--temperature", type=float, help="couleur : -100 (bleu) à 100 (orange) ; défaut : 30")
+    q.add_argument("--curve", choices=list(montage.CURVES), help="courbe de luminance (défaut : douce)")
+    q.add_argument("--grain", type=float, help="grain de film (0 à 20 ; défaut : 4 ; au-delà de 5, les fichiers grossissent vite)")
+    q.add_argument("--staccato", choices=montage.TRANSITIONS,
+                   help="découpe rapide : un effet tous les 1 à 2 s (défaut : zoom)")  # fmt: skip
+    q.add_argument("--staccato-every", type=staccato_lengths, metavar="MIN-MAX",
+                   help='durée des segments de la découpe rapide, ex. "1-2" (secondes)')  # fmt: skip
+    q.add_argument("--stretch", type=float, help="tempo de toute la vidéo, en %% (-10 à 10 ; défaut : 3)")
+    q.add_argument("--pitch", type=float, help="hauteur du son, en demi-tons (-3 à 3 ; défaut : 0,5)")
+    q.add_argument("--eq", choices=list(montage.EQS), help="égaliseur (défaut : shelf)")
+    q.add_argument("--bed", choices=list(montage.BEDS), help="fond sonore discret (défaut : vent)")
+    q.add_argument("--bed-level", type=float, help="niveau du fond sonore, en dB (-60 à -20 ; défaut : -40)")
     q.add_argument("--encoder", choices=montage.ENCODERS, help="encodeur (défaut : auto, AMF s'il marche, sinon x264)")
     q.add_argument("--quality", choices=montage.QUALITIES, help="qualité (défaut : standard)")
     q.add_argument("--range", dest="ranges", action="append", type=passage, default=[],
@@ -170,6 +185,15 @@ def seconds(text: str) -> float:
     return int(m.group(1) or 0) * 60 + float(m.group(2).replace(",", "."))
 
 
+def staccato_lengths(text: str) -> tuple[float, float]:
+    """argparse type: "1-2" or "1,5" -> (min, max) seconds."""
+    m = _BAND_RE.match(text) or re.match(r"^\s*(\d+(?:[.,]\d+)?)\s*$", text)
+    if not m:
+        raise argparse.ArgumentTypeError(f'durées attendues comme "1-2" (secondes), pas {text!r}')
+    values = [float(g.replace(",", ".")) for g in m.groups()]
+    return values[0], values[-1]
+
+
 def passage(text: str) -> dict:
     """argparse type: "0:40-0:55x1.5" (accéléré) or "1:20-1:32" (coupé : sans x)."""
     m = _PASSAGE_RE.match(text.strip())
@@ -197,7 +221,9 @@ def cmd_montage_show(args, log) -> int:
     series_dir = _series_dir(args)
     recipe = montage.load(series_dir)
     if recipe is None:
-        print(f"Pas de montage pour {series_dir.name}. Exemple : sdg montage set {args.target} --mirror --trim-start 3")
+        print(f"Pas de montage réglé pour {series_dir.name} : le montage par défaut s'appliquera.")
+        print(f"Montage : {montage.describe(montage.validate({}))}")
+        print(f"Exemple : sdg montage set {args.target} --trim-start 3 --no-effects")
         return 0
     print(f"Montage : {montage.describe(recipe)}")
     for number, ep in sorted(recipe["episodes"].items(), key=lambda kv: int(kv[0])):
@@ -222,7 +248,8 @@ def cmd_montage_set(args, log) -> int:
     if args.episode is not None:
         if args.episode < 1:
             raise InputError("numéro d'épisode attendu (1, 2, …)")
-        series_wide = ("mirror", "keep_subs", "band", "speed", "look", "brightness", "contrast", "saturation", "encoder", "quality")
+        series_wide = ("mirror", "keep_subs", "band", "speed", "look", "brightness", "contrast", "saturation", *EFFECT_ARGS,
+                       "encoder", "quality")  # fmt: skip
         used = [f for f in series_wide if getattr(args, f) is not None]
         if used:
             raise InputError(f"--{used[0].replace('_', '-')} vaut pour toute la série : retire -e")
@@ -257,12 +284,35 @@ def cmd_montage_set(args, log) -> int:
         for key in montage.LOOK_LIMITS:
             if getattr(args, key) is not None:
                 recipe["look"][key] = getattr(args, key)
+        _set_effects(recipe, args)
         for key in ("encoder", "quality"):
             if getattr(args, key) is not None:
                 recipe["render"][key] = getattr(args, key)
     recipe = montage.save(series_dir, recipe)
     print(f"Montage : {montage.describe(recipe)}")
     return 0
+
+
+EFFECT_ARGS = ("effects", "zoom", "temperature", "curve", "grain", "staccato", "staccato_every", "stretch", "pitch", "eq",
+               "bed", "bed_level")  # fmt: skip
+
+
+def _set_effects(recipe: dict, args) -> None:
+    """The effects options of "montage set", over the recipe (validated when saved)."""
+    if args.effects is not None:
+        preset = montage.validate({} if args.effects else montage.EFFECTS_OFF)
+        recipe.update({key: preset[key] for key in montage.EFFECTS_OFF})
+    for arg in ("zoom", "grain", "stretch"):
+        if getattr(args, arg) is not None:
+            recipe[arg] = getattr(args, arg)
+    for arg, group, key in (
+        ("temperature", "grade", "temperature"), ("curve", "grade", "curve"), ("staccato", "staccato", "transition"),
+        ("pitch", "audio", "pitch"), ("eq", "audio", "eq"), ("bed", "audio", "bed"), ("bed_level", "audio", "bed_level"),
+    ):  # fmt: skip
+        if getattr(args, arg) is not None:
+            recipe[group][key] = getattr(args, arg)
+    if args.staccato_every is not None:
+        recipe["staccato"]["min"], recipe["staccato"]["max"] = args.staccato_every
 
 
 def _band(text: str):
@@ -299,9 +349,7 @@ def cmd_montage_preview(args, log) -> int:
 
 def cmd_montage_render(args, log) -> int:
     series_dir = _series_dir(args)
-    recipe = montage.load(series_dir)
-    if recipe is None:
-        raise film.FilmError("Pas de montage pour cette série : crée-le d'abord (sdg montage set …).", errors.MONTAGE_INVALID)
+    recipe = montage.recipe_of(series_dir)
     only = {n for a, b in args.episodes for n in range(a, (b or 9999) + 1)} if args.episodes else None
     plan = film.plan_film(series_dir, True, only)
     ffmpeg = film.find_ffmpeg(args.ffmpeg)

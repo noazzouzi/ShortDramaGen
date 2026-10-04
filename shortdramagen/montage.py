@@ -1,4 +1,6 @@
-"""Montage: edit the downloaded episodes (mirror, trims, look, speed, cut or sped-up passages), then join them.
+"""Montage: edit the downloaded episodes (mirror, trims, look, speed, cut or sped-up passages, and the
+effects on by default: zoom, colour grading, grain, quick cuts, tempo, pitch, equaliser, background
+sound), then join them.
 
 The recipe of a series lives in ``<series>/montage.json``, outside the manifest (a running fetch
 rewrites the whole manifest from memory and would drop it). Episode files are never modified: each
@@ -13,18 +15,25 @@ Burned-in subtitles: the platforms burn white subtitles into the picture, which 
 reverse. With ``keep_subtitles``, inside the subtitle band, the pixels of the original text (bright,
 grey, next to a dark outline) are pasted back over the mirrored frame, whose own reversed text is
 blurred away first. The masks are computed at half resolution: cheaper, and smoother edges.
-Measurements and choices: docs/06-montage.md.
+
+Effects: the image is zoomed (cropped then scaled back), graded (chroma shift towards orange or
+blue, luma curve) and grained; quick cuts mark every 1 to 2 s of output with a punch-in zoom, a
+flash or a black frame (the story is kept whole); the tempo, the pitch and the equaliser change the
+sound, and a quiet background (noise, wind, bass drone) is mixed under it. Each is off at its
+neutral value (see EFFECTS_OFF). Measurements and choices: docs/06-montage.md.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
 import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Callable
 
@@ -53,16 +62,61 @@ ENCODERS = ("auto", "x264", "amf")
 QUALITIES = ("standard", "compacte")
 DEFAULT_BAND = (0.55, 0.85)  # of the height, when no subtitle is found to measure it
 
+# Effects: limits, choices and filters. Tempo and zoom in %, pitch in semitones, levels in dBFS.
+STRETCH_RANGE = (-10.0, 10.0)
+ZOOM_RANGE = (0.0, 15.0)
+TEMPERATURE_RANGE = (-100.0, 100.0)  # -: blue, +: orange; 100 moves U and V by 10 levels
+GRAIN_RANGE = (0.0, 20.0)  # strength of ffmpeg's noise on the luma; above 5 the files grow fast
+STACCATO_RANGE = (0.5, 10.0)  # length of a quick-cut segment, s of output
+PITCH_RANGE = (-3.0, 3.0)
+BED_LEVEL_RANGE = (-60.0, -20.0)
+CURVES = {  # luma curves for lutyuv; x is the luma from 0 to 1
+    "aucune": None,
+    "douce": "0.045+0.91*{x}",  # lifted blacks, softer whites
+    "contraste": "{x}-0.35/(2*PI)*sin(2*PI*{x})",  # S curve
+}
+TRANSITIONS = ("aucune", "zoom", "flash", "noir")
+STACCATO_PUNCH = 0.08  # the "zoom" transition: every other segment is 8 % closer
+FLASH_FRAMES = 2
+EQS = {
+    "aucun": None,
+    "shelf": "bass=g=-8:f=120:t=q:w=0.7,treble=g=-8:f=7000:t=q:w=0.7",
+    "notch": "equalizer=f=950:t=q:w=4:g=-18,equalizer=f=2900:t=q:w=4:g=-18",
+}
+BEDS = {  # source, and the gain that brings its RMS level to 0 dBFS (measured with astats)
+    "aucun": None,
+    "blanc": ("anoisesrc=r=44100:c=white:a=1:s=7", 4.8),
+    "vent": ("anoisesrc=r=44100:c=brown:a=1:s=7,lowpass=f=500,tremolo=f=0.15:d=0.5", 17.1),
+    "basse": ("aevalsrc=0.6*sin(2*PI*55*t)+0.4*sin(2*PI*82.5*t):s=44100,lowpass=f=200,tremolo=f=0.1:d=0.3", 7.2),
+}
+AUDIO_FORMAT = "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
+GRAPH_INLINE_MAX = 16_000  # longer graphs go through a file (Windows limits a command line to 32 KiB)
+
 DEFAULT = {
     "v": 1,
-    "mirror": False,
+    "mirror": True,
     "keep_subtitles": True,
     "subtitle_band": "auto",
     "trim": {"start": 0, "end": 0},
     "speed": 1,
     "look": {"preset": "aucun"},
+    "stretch": 3,
+    "zoom": 4,
+    "grade": {"temperature": 30, "curve": "douce"},
+    "grain": 4,
+    "staccato": {"transition": "zoom", "min": 1, "max": 2},
+    "audio": {"pitch": 0.5, "eq": "shelf", "bed": "vent", "bed_level": -40},
     "render": {"encoder": "auto", "quality": "standard"},
     "episodes": {},
+}
+# Every effect at its neutral value (the mirror has its own switch): "sdg montage set --no-effects".
+EFFECTS_OFF = {
+    "stretch": 0,
+    "zoom": 0,
+    "grade": {"temperature": 0, "curve": "aucune"},
+    "grain": 0,
+    "staccato": {"transition": "aucune"},
+    "audio": {"pitch": 0, "eq": "aucun", "bed": "aucun"},
 }
 
 Log = Callable[[str], None]
@@ -100,6 +154,12 @@ def _object(value, field: str, keys: set[str]) -> dict:
     unknown = sorted(set(value) - keys)
     if unknown:
         raise RecipeError(f"{field}.{unknown[0]}" if field else unknown[0], "clé inconnue")
+    return value
+
+
+def _choice(value, field: str, options) -> str:
+    if value not in options:
+        raise RecipeError(field, f"parmi {', '.join(options)}")
     return value
 
 
@@ -168,6 +228,34 @@ def validate(data) -> dict:
         for k, (low, high) in LOOK_LIMITS.items():
             if k in look:
                 recipe["look"][k] = _number(look[k], f"look.{k}", low, high)
+    for key, limits in (("stretch", STRETCH_RANGE), ("zoom", ZOOM_RANGE), ("grain", GRAIN_RANGE)):
+        if key in data:
+            recipe[key] = _number(data[key], key, *limits)
+    if "grade" in data:  # grade, staccato, audio: what is given replaces the default, key by key
+        grade = _object(data["grade"], "grade", {"temperature", "curve"})
+        if "temperature" in grade:
+            recipe["grade"]["temperature"] = _number(grade["temperature"], "grade.temperature", *TEMPERATURE_RANGE)
+        if "curve" in grade:
+            recipe["grade"]["curve"] = _choice(grade["curve"], "grade.curve", CURVES)
+    if "staccato" in data:
+        staccato = _object(data["staccato"], "staccato", {"transition", "min", "max"})
+        if "transition" in staccato:
+            recipe["staccato"]["transition"] = _choice(staccato["transition"], "staccato.transition", TRANSITIONS)
+        for k in ("min", "max"):
+            if k in staccato:
+                recipe["staccato"][k] = _number(staccato[k], f"staccato.{k}", *STACCATO_RANGE)
+        if recipe["staccato"]["max"] < recipe["staccato"]["min"]:
+            raise RecipeError("staccato.max", "doit être au moins égal à « min »")
+    if "audio" in data:
+        audio = _object(data["audio"], "audio", {"pitch", "eq", "bed", "bed_level"})
+        if "pitch" in audio:
+            recipe["audio"]["pitch"] = _number(audio["pitch"], "audio.pitch", *PITCH_RANGE)
+        if "eq" in audio:
+            recipe["audio"]["eq"] = _choice(audio["eq"], "audio.eq", EQS)
+        if "bed" in audio:
+            recipe["audio"]["bed"] = _choice(audio["bed"], "audio.bed", BEDS)
+        if "bed_level" in audio:
+            recipe["audio"]["bed_level"] = _number(audio["bed_level"], "audio.bed_level", *BED_LEVEL_RANGE)
     if "render" in data:
         render = _object(data["render"], "render", {"encoder", "quality"})
         if render.get("encoder", "auto") not in ENCODERS:
@@ -204,6 +292,11 @@ def load(series_dir: Path) -> dict | None:
     return validate(data)
 
 
+def recipe_of(series_dir: Path) -> dict:
+    """montage.json, or the default montage (its effects on) when the series has none."""
+    return load(series_dir) or validate({})
+
+
 def save(series_dir: Path, recipe: dict) -> dict:
     recipe = validate(recipe)
     fsutil.write_text(series_dir / RECIPE_FILE, json.dumps(recipe, ensure_ascii=False, indent=2) + "\n")
@@ -215,6 +308,8 @@ def is_neutral(recipe: dict) -> bool:
     return (
         not recipe["mirror"] and not any(recipe["trim"].values()) and recipe["speed"] == 1
         and look_settings(recipe) == LOOK_NEUTRAL and not recipe["episodes"]
+        and not image_effects(recipe) and not sound_effects(recipe) and not recipe["stretch"]
+        and recipe["staccato"]["transition"] == "aucune"
     )  # fmt: skip
 
 
@@ -223,8 +318,35 @@ def look_settings(recipe: dict) -> dict:
     return {**LOOK_NEUTRAL, **LOOKS[look["preset"]], **{k: look[k] for k in LOOK_LIMITS if k in look}}
 
 
+def image_effects(recipe: dict) -> list[str]:
+    """["zoom 4 %", "plus chaud (30)", "courbe douce", "grain 4"]: the effects on the picture."""
+    out = []
+    if recipe["zoom"]:
+        out.append(f"zoom {_n(recipe['zoom'])} %")
+    temperature = recipe["grade"]["temperature"]
+    if temperature:
+        out.append(f"{'plus chaud' if temperature > 0 else 'plus froid'} ({_n(abs(temperature))})")
+    if recipe["grade"]["curve"] != "aucune":
+        out.append(f"courbe {recipe['grade']['curve']}")
+    if recipe["grain"]:
+        out.append(f"grain {_n(recipe['grain'])}")
+    return out
+
+
+def sound_effects(recipe: dict) -> list[str]:
+    """["+0,5 demi-ton", "égaliseur shelf", "fond vent à -40 dB"]: the effects on the sound (tempo aside)."""
+    audio, out = recipe["audio"], []
+    if audio["pitch"]:
+        out.append(f"{'+' if audio['pitch'] > 0 else ''}{_n(audio['pitch'])} demi-ton")
+    if audio["eq"] != "aucun":
+        out.append(f"égaliseur {audio['eq']}")
+    if audio["bed"] != "aucun":
+        out.append(f"fond {audio['bed']} à {_n(audio['bed_level'])} dB")
+    return out
+
+
 def describe(recipe: dict) -> str:
-    """"Miroir (sous-titres gardés) · coupe 5 s / 10 s · vif · ×1,25 · 2 épisodes retouchés"."""
+    """"Miroir (sous-titres gardés) · coupe 5 s / 10 s · vif · ×1,25 · zoom 4 %, grain 4 · … · 2 épisodes retouchés"."""
     parts = []
     if recipe["mirror"]:
         parts.append("miroir" + (" (sous-titres gardés)" if recipe["keep_subtitles"] else ""))
@@ -235,6 +357,16 @@ def describe(recipe: dict) -> str:
         parts.append(f"look {recipe['look']['preset']}")
     if recipe["speed"] != 1:
         parts.append(f"vitesse ×{_n(recipe['speed'])}")
+    if image_effects(recipe):
+        parts.append(", ".join(image_effects(recipe)))
+    staccato = recipe["staccato"]
+    if staccato["transition"] != "aucune":
+        lengths = _n(staccato["min"]) if staccato["min"] == staccato["max"] else f"{_n(staccato['min'])}-{_n(staccato['max'])}"
+        parts.append(f"découpe rapide {lengths} s ({staccato['transition']})")
+    if recipe["stretch"]:
+        parts.append(f"tempo {'+' if recipe['stretch'] > 0 else ''}{_n(recipe['stretch'])} %")
+    if sound_effects(recipe):
+        parts.append("son " + ", ".join(sound_effects(recipe)))
     if recipe["episodes"]:
         parts.append(f"{len(recipe['episodes'])} épisode(s) retouché(s) à part")
     return " · ".join(parts) or "aucune retouche"
@@ -267,7 +399,8 @@ def episode_trim(recipe: dict, number: int) -> dict:
 
 
 def segments(recipe: dict, number: int, duration: float) -> list[Segment]:
-    """What is kept of an episode, in order, each part with its speed."""
+    """What is kept of an episode, in order, each part with its speed (the tempo change included)."""
+    tempo = 1 + recipe["stretch"] / 100
     trim = episode_trim(recipe, number)
     low, high = trim["start"], duration - trim["end"]
     if high - low < MIN_KEPT_S:
@@ -281,12 +414,12 @@ def segments(recipe: dict, number: int, duration: float) -> list[Segment]:
         if b <= a:
             continue  # outside what the trims keep
         if a > cursor:
-            out.append(Segment(cursor, a, recipe["speed"]))
+            out.append(Segment(cursor, a, recipe["speed"] * tempo))
         if not r.get("cut"):
-            out.append(Segment(a, b, r["speed"]))
+            out.append(Segment(a, b, r["speed"] * tempo))
         cursor = max(cursor, b)
     if high > cursor:
-        out.append(Segment(cursor, high, recipe["speed"]))
+        out.append(Segment(cursor, high, recipe["speed"] * tempo))
     merged: list[Segment] = []
     for seg in out:
         if seg.end - seg.start < MIN_SEGMENT_S:
@@ -308,6 +441,50 @@ def clip(segs: list[Segment], low: float, high: float) -> list[Segment]:
         a, b = max(s.start, low), min(s.end, high)
         if b - a >= MIN_SEGMENT_S:
             out.append(Segment(a, b, s.speed))
+    return out
+
+
+def out_time(segs: list[Segment], t: float) -> float:
+    """Where source second ``t`` lands in the edited episode (seconds of output)."""
+    total = 0.0
+    for s in segs:
+        if t <= s.start:
+            break
+        total += (min(t, s.end) - s.start) / s.speed
+    return total
+
+
+Intervals = list[tuple[float, float]]  # seconds of output, where a quick-cut transition shows
+
+
+def staccato_intervals(recipe: dict, number: int, length: float, fps: str) -> Intervals:
+    """The quick cuts of an episode of ``length`` s of output: segments of min to max seconds,
+    drawn from a generator seeded with the episode number (the same cuts at every render).
+    "zoom": every other segment; "flash", "noir": the first frames of each segment but the first."""
+    st = recipe["staccato"]
+    if st["transition"] == "aucune":
+        return []
+    rng = random.Random(number)
+    cuts, t = [], 0.0
+    while True:
+        t += rng.uniform(st["min"], st["max"])
+        if t > length - st["min"] / 2:  # no tiny segment at the end
+            break
+        cuts.append(round(t, 3))
+    if st["transition"] == "zoom":
+        bounds = [*cuts, round(length, 3)]
+        return [(bounds[i], bounds[i + 1]) for i in range(0, len(bounds) - 1, 2)]
+    frames = round(FLASH_FRAMES / float(Fraction(fps)) - 0.001, 3)  # just short of the next frame
+    return [(c, round(c + frames, 3)) for c in cuts]
+
+
+def shift(intervals: Intervals, offset: float, length: float) -> Intervals:
+    """Intervals seen from a window of the episode starting at ``offset`` s of output (a preview)."""
+    out = []
+    for a, b in intervals:
+        a, b = max(a - offset, 0.0), min(b - offset, length)
+        if b > a:
+            out.append((round(a, 3), round(b, 3)))
     return out
 
 
@@ -379,21 +556,28 @@ def _keep_subtitles(width: int, top: int, bottom: int) -> list[str]:
 
 
 def episode_graph(
-    segs: list[Segment], profile: Profile, recipe: dict, has_audio: bool, band: tuple[float, float] | None
+    segs: list[Segment],
+    profile: Profile,
+    recipe: dict,
+    has_audio: bool,
+    band: tuple[float, float] | None,
+    staccato: Intervals = (),
 ) -> str:
-    """The filter graph of one episode. ``segs`` are relative to the input seek point (0 = first kept frame).
+    """The filter graph of one episode. ``segs`` are relative to the input seek point (0 = first kept frame),
+    ``staccato`` (see staccato_intervals) to the first frame of output.
 
     Parts are cut on the common clock (PTS - start), never with STARTPTS: ShortMax's video starts
     0.16 s after its audio, resetting each stream would shift the sound.
     """
     lines = []
     n = len(segs)
+    sound = "[am]" if sound_effects(recipe) else "[a]"
     if n == 1 and segs[0].start < 1e-6:
         s = segs[0]
         video = "[0:v]" + (f"setpts=PTS/{s.speed:.6g}," if s.speed != 1 else "")
         audio = f"[0:a]{_atempo(s.speed)}," if s.speed != 1 else "[0:a]"
         if has_audio:
-            lines.append(f"{audio}aformat=sample_rates=44100:channel_layouts=stereo[a]")
+            lines.append(f"{audio}aformat=sample_rates=44100:channel_layouts=stereo{sound}")
     else:
         lines.append(f"[0:v]split={n}" + "".join(f"[s{i}]" for i in range(n)))
         if has_audio:
@@ -406,12 +590,14 @@ def episode_graph(
                 lines.append(f"[t{i}]atrim={s.start:.3f}:{s.end:.3f},asetpts=PTS-{s.start:.3f}/TB{tempo}[a{i}]")
         if has_audio:
             lines.append("".join(f"[v{i}][a{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=1[vc][ac]")
-            lines.append("[ac]aformat=sample_rates=44100:channel_layouts=stereo[a]")
+            lines.append(f"[ac]aformat=sample_rates=44100:channel_layouts=stereo{sound}")
         else:
             lines.append("".join(f"[v{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0[vc]")
         video = "[vc]"
     if not has_audio:  # a silent episode still needs a sound track to join the others
-        lines.append(f"anullsrc=r=44100:cl=stereo,atrim=duration={sum(s.out for s in segs):.3f}[a]")
+        lines.append(f"anullsrc=r=44100:cl=stereo,atrim=duration={sum(s.out for s in segs):.3f}{sound}")
+    if sound != "[a]":
+        lines += _sound_effects(recipe["audio"])
 
     w, h = profile.width, profile.height
     lines.append(
@@ -425,12 +611,79 @@ def episode_graph(
         else:
             lines.append("[vn]hflip[vm]")
         last = "[vm]"
+    zoom = 1 + recipe["zoom"] / 100
+    transition = recipe["staccato"]["transition"] if staccato else "aucune"
+    if transition == "zoom":  # a closer copy of the frame laid over it, every other segment
+        lines.append(f"{last}split[z_a][z_b]")
+        lines.append(f"[z_a]{_zoom(w, h, zoom) or 'null'}[z_base]")
+        lines.append(f"[z_b]{_zoom(w, h, zoom * (1 + STACCATO_PUNCH))}[z_close]")
+        lines.append(f"[z_base][z_close]overlay=0:0:enable='{_during(staccato)}'[vz]")
+        last = "[vz]"
+    elif zoom != 1:
+        lines.append(f"{last}{_zoom(w, h, zoom)}[vz]")
+        last = "[vz]"
     look = look_settings(recipe)
-    tail = ["format=yuv420p"]  # always last: after RGB-ish work, x264 would pick 4:4:4, unreadable in browsers
+    tail = []
     if look != LOOK_NEUTRAL:
-        tail.insert(0, f"eq=brightness={look['brightness']:g}:contrast={look['contrast']:g}:saturation={look['saturation']:g}")
+        tail.append(f"eq=brightness={look['brightness']:g}:contrast={look['contrast']:g}:saturation={look['saturation']:g}")
+    grade = _grade(recipe["grade"])
+    if grade:
+        tail.append(grade)
+    if recipe["grain"]:  # temporal noise on the luma only: film grain, not coloured specks
+        tail.append(f"noise=c0s={recipe['grain']:g}:c0f=t")
+    if transition == "flash":
+        tail.append(f"lutyuv=y='min(val+90,235)':enable='{_during(staccato)}'")
+    elif transition == "noir":
+        tail.append(f"drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='{_during(staccato)}'")
+    tail.append("format=yuv420p")  # always last: after RGB-ish work, x264 would pick 4:4:4, unreadable in browsers
     lines.append(f"{last}{','.join(tail)}[v]")
     return ";\n".join(lines)
+
+
+def _zoom(width: int, height: int, factor: float) -> str:
+    """The centre of the frame, ``factor`` times closer, at the same size ("" for no zoom)."""
+    if factor <= 1:
+        return ""
+    cw, ch = int(width / factor) // 2 * 2, int(height / factor) // 2 * 2
+    return f"crop={cw}:{ch}:{(width - cw) // 2}:{(height - ch) // 2},scale={width}:{height}"
+
+
+def _during(intervals: Intervals) -> str:
+    """A timeline expression true inside the intervals (a lone 0 when there are none)."""
+    return "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in intervals) or "0"
+
+
+def _grade(grade: dict) -> str:
+    """Temperature as a chroma shift (U down and V up: orange), curve on the luma: one lutyuv, cheap."""
+    parts = []
+    curve = CURVES[grade["curve"]]
+    if curve:
+        parts.append(f"y='16+219*({curve.format(x='clip((val-16)/219,0,1)')})'")
+    shift = round(grade["temperature"] / 10, 1)
+    if shift:
+        parts.append(f"u='clip(val{-shift:+g},16,240)'")
+        parts.append(f"v='clip(val{shift:+g},16,240)'")
+    return f"lutyuv={':'.join(parts)}" if parts else ""
+
+
+def _sound_effects(audio: dict) -> list[str]:
+    """[am] -> [a]: pitch, equaliser, then the background mixed under the sound."""
+    chain = []
+    if audio["pitch"]:
+        # played faster (higher), then slowed back to its length without changing the pitch
+        rate = round(44100 * 2 ** (audio["pitch"] / 12))
+        chain += [f"asetrate={rate}", "aresample=44100", _atempo(44100 / rate)]
+    if EQS[audio["eq"]]:
+        chain.append(EQS[audio["eq"]])
+    if not BEDS[audio["bed"]]:
+        return [f"[am]{','.join(chain)}[a]"]
+    source, gain = BEDS[audio["bed"]]
+    chain.append(AUDIO_FORMAT)  # amerge wants the same sample format on both sides
+    return [
+        f"[am]{','.join(chain)}[a_main]",
+        f"{source},volume={audio['bed_level'] + gain:.1f}dB,{AUDIO_FORMAT}[a_bed]",
+        "[a_main][a_bed]amerge=inputs=2,pan=stereo|c0=c0+c2|c1=c1+c3[a]",  # ends with the sound: the bed never does
+    ]
 
 
 def encoder_args(profile: Profile) -> list[str]:
@@ -442,12 +695,17 @@ def encoder_args(profile: Profile) -> list[str]:
     return ["-c:v", "libx264", "-preset", "veryfast", "-crf", {"standard": "23", "compacte": "26"}[profile.quality]]
 
 
-def render_args(ffmpeg: str, source: Path, low: float, high: float, graph: str, profile: Profile, output: Path) -> list[str]:
-    """Seeking before -i with a re-encode cuts at the exact frame and skips decoding the trimmed start."""
+def render_args(
+    ffmpeg: str, source: Path, low: float, high: float, graph: str, profile: Profile, output: Path,
+    script: Path | None = None,
+) -> list[str]:
+    """Seeking before -i with a re-encode cuts at the exact frame and skips decoding the trimmed start.
+    ``script``: the file that holds the graph, when it is too long for a command line."""
+    graph_args = film.filter_script_args(ffmpeg, script) if script else ["-filter_complex", graph.replace("\n", "")]
     return [
         ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
         "-ss", f"{low:.3f}", "-to", f"{high:.3f}", "-i", str(source.resolve()),
-        "-filter_complex", graph.replace("\n", ""), "-map", "[v]", "-map", "[a]",
+        *graph_args, "-map", "[v]", "-map", "[a]",
         "-map_metadata", "-1", "-map_chapters", "-1",
         *encoder_args(profile), "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
         "-movflags", "+faststart", "-f", "mp4", str(output),
@@ -607,12 +865,16 @@ def status(series_dir: Path) -> dict:
     }
 
 
-def episode_key(profile: Profile, recipe: dict, number: int, segs: list[Segment], band, source: Path) -> str:
+def episode_key(
+    profile: Profile, recipe: dict, number: int, segs: list[Segment], band, source: Path, staccato: Intervals = ()
+) -> str:
     stat = source.stat()
     data = {
         "engine": ENGINE, "profile": profile.as_dict(), "segments": [[s.start, s.end, s.speed] for s in segs],
         "mirror": recipe["mirror"], "keep": recipe["keep_subtitles"] and recipe["mirror"], "band": band,
         "look": look_settings(recipe), "source": [stat.st_size, stat.st_mtime_ns],
+        "effects": {k: recipe[k] for k in ("zoom", "grade", "grain", "audio")},
+        "staccato": [recipe["staccato"]["transition"], [list(i) for i in staccato]],
     }  # fmt: skip
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:20]
 
@@ -666,25 +928,27 @@ def render_series(
     plans, keys, output_s = [], {}, 0.0
     for part in parts:
         segs = segments(recipe, part.number, part.info.presentation)
-        output_s += sum(s.out for s in segs)
-        key = episode_key(profile, recipe, part.number, segs, band, part.path)
+        length = sum(s.out for s in segs)
+        output_s += length
+        cuts = staccato_intervals(recipe, part.number, length, profile.fps)
+        key = episode_key(profile, recipe, part.number, segs, band, part.path, cuts)
         keys[part.number] = key
         target = out_dir / f"E{part.number:03d}.mp4"
         entry = done.get(str(part.number)) or {}
         fresh = entry.get("key") == key and target.exists() and target.stat().st_size == entry.get("bytes")
         if force or not fresh:
-            plans.append((part, segs, key, target))
-    total = sum(sum(s.out for s in segs) for _, segs, _, _ in plans)
+            plans.append((part, segs, cuts, key, target))
+    total = sum(sum(s.out for s in segs) for _, segs, *_ in plans)
     todo = {part.number for part, *_ in plans}
     report = RenderReport(profile, band, [], [p.number for p in parts if p.number not in todo], output_s)
     if plans:
         log(f"Montage de {len(plans)} épisode(s) ({profile.encoder}, {film.format_duration(total)} de vidéo), "
             f"{len(report.reused)} déjà prêt(s)")  # fmt: skip
     offset = 0.0
-    for part, segs, key, target in plans:
+    for part, segs, cuts, key, target in plans:
         length = sum(s.out for s in segs)
         progress = (lambda t, _total, base=offset: on_progress(base + t, total)) if on_progress else None
-        size = render_episode(ffmpeg, part, segs, profile, recipe, band, target, progress, stop)
+        size = render_episode(ffmpeg, part, segs, profile, recipe, band, target, progress, stop, staccato=cuts)
         done[str(part.number)] = {"key": key, "out_s": round(length, 3), "bytes": size}
         _save_index(series_dir, {**_index(series_dir), "episodes": done})
         report.rendered.append(part.number)
@@ -703,16 +967,21 @@ def render_episode(
     on_progress: Progress | None = None,
     stop: threading.Event | None = None,
     low_priority: bool = True,
+    staccato: Intervals = (),
 ) -> int:
     """One episode through ffmpeg, checked (length, format), then put in place. Returns its size."""
     low, high = segs[0].start, segs[-1].end
     relative = [Segment(s.start - low, s.end - low, s.speed) for s in segs]
-    graph = episode_graph(relative, profile, recipe, part.info.audio is not None, band)
+    graph = episode_graph(relative, profile, recipe, part.info.audio is not None, band, staccato)
     tmp = target.with_name(f".rendu-{target.stem}.mp4")
     expected = sum(s.out for s in segs)
     try:
         with tempfile.TemporaryDirectory(prefix="sdg-montage-") as work:
-            args = render_args(ffmpeg, part.path, low, high, graph, profile, tmp)
+            script = None
+            if len(graph) > GRAPH_INLINE_MAX:  # many quick cuts in a long episode
+                script = Path(work) / "graphe.txt"
+                script.write_text(graph.replace("\n", ""), encoding="utf-8")
+            args = render_args(ffmpeg, part.path, low, high, graph, profile, tmp, script)
             film._run_ffmpeg(args, expected, Path(work) / "ffmpeg.log", on_progress, stop, low_priority)
         duration = mp4.duration_seconds(tmp) if tmp.exists() else None
         tolerance = 0.15 + 0.04 * len(segs)
@@ -743,12 +1012,10 @@ def make_montage_film(
     """Render what changed, then join the edited episodes without re-encoding.
 
     The film takes the name of the plain one and replaces it (see film.make_film).
-    ``recipe``: the one frozen when a job was created, else montage.json.
+    ``recipe``: the one frozen when a job was created, else montage.json, else the default montage.
     ``on_phase``: told "rendering", then "merging".
     """
-    recipe = recipe or load(series_dir)
-    if recipe is None:
-        raise RecipeError("", "Pas de montage pour cette série : crée-le d'abord (sdg montage set …).")
+    recipe = recipe or recipe_of(series_dir)
     source = film.plan_film(series_dir, allow_missing, only)
     if source.missing:
         log(f"Attention : épisodes absents, film incomplet (manquent : {film.format_ranges(source.missing)})")
@@ -777,16 +1044,19 @@ def preview(
     output: Path | None = None, log: Log = print,
 ) -> Path:
     """A few seconds of one episode as the montage will render it, from ``at`` (source seconds)."""
-    recipe = recipe or load(series_dir) or validate({})
+    recipe = recipe or recipe_of(series_dir)
     plan = film.plan_film(series_dir, True, {number})
     if not plan.parts:
         raise FilmError(f"Épisode {number} absent ou illisible", errors.FILM_MISSING_EPISODES)
     part = plan.parts[0]
     source_plan = film.plan_film(series_dir, True)
     profile, band = prepare(series_dir, recipe, ffmpeg, source_plan.parts, log)
-    window = clip(segments(recipe, number, part.info.presentation), at, at + seconds)
+    full = segments(recipe, number, part.info.presentation)
+    window = clip(full, at, at + seconds)
     if not window:
         raise FilmError(f"Rien à montrer entre {_s(at)} et {_s(at + seconds)} : ce passage est coupé.", errors.MONTAGE_INVALID)
+    cuts = staccato_intervals(recipe, number, sum(s.out for s in full), profile.fps)  # as in the whole episode
+    cuts = shift(cuts, out_time(full, window[0].start), sum(s.out for s in window))
     output = output or montage_dir(series_dir) / PREVIEW_FILE
-    render_episode(ffmpeg, part, window, profile, recipe, band, output, low_priority=False)
+    render_episode(ffmpeg, part, window, profile, recipe, band, output, low_priority=False, staccato=cuts)
     return output

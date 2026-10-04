@@ -600,6 +600,25 @@ function filmSection(ctx, group, detail, ui) {
 
 const LOOKS = { aucun: "Aucun", vif: "Couleurs vives", doux: "Doux", nb: "Noir et blanc" };
 const SPEEDS = [1, 1.1, 1.25, 1.5, 2];
+// Effets (activés par défaut, voir montage.DEFAULT) : valeurs proposées dans les listes.
+const ZOOMS = [0, 3, 4, 5, 8];
+const TEMPERATURES = [[-60, "Bleu marqué"], [-30, "Plus froid (bleu)"], [0, "Neutre"], [30, "Plus chaud (orange)"], [60, "Orange marqué"]];
+const CURVES = { aucune: "Aucune", douce: "Douce (noirs relevés)", contraste: "Contrastée (en S)" };
+const GRAINS = [[0, "Aucun"], [2, "Très fin (2)"], [4, "Fin (4)"], [6, "Visible (6, fichiers plus gros)"]];
+const TRANSITIONS = { aucune: "Aucune", zoom: "Zoom rapproché", flash: "Flash (2 images)", noir: "Noir (2 images)" };
+const STRETCHES = [-3, -2, 0, 2, 3];
+const PITCHES = [-1, -0.5, 0, 0.5, 1];
+const EQS = { aucun: "Aucun", shelf: "Shelf (graves et aigus atténués)", notch: "Notch (deux fréquences creusées)" };
+const BEDS = { aucun: "Aucun", blanc: "Bruit blanc", vent: "Vent léger", basse: "Nappe de basse sourde" };
+const BED_LEVELS = [-50, -45, -40, -35, -30];
+
+const signed = (x) => (x > 0 ? `+${num(x)}` : num(x));
+
+// Options d'une liste, la valeur actuelle ajoutée si elle n'y est pas (réglée en CLI par exemple).
+function steps(list, value, label) {
+  const pairs = list.map((x) => (Array.isArray(x) ? x : [x, label(x)]));
+  return pairs.some(([v]) => v === value) ? pairs : [...pairs, [value, label(value)]].sort((a, b) => a[0] - b[0]);
+}
 const PASSAGE_SPEEDS = [1.25, 1.5, 2, 3];
 
 const num = (x) => String(Math.round(x * 100) / 100).replace(".", ",");
@@ -656,7 +675,7 @@ function montageSection(ctx, group, detail, ui) {
   const filmJob = ctx.state.jobs.active.find((j) => j.kind === "film" && j.series_key === key);
   if (m.recipe) title.append(h("span", { class: "badge badge-info", text: "Réglé" }));
   const rendered = m.rendered ? ` · ${plural(m.rendered, "épisode déjà monté", "épisodes déjà montés")} (${bytes(m.rendered_bytes)})` : "";
-  card.append(h("p", { class: "film-state", text: m.summary ? `${capitalize(m.summary)}${rendered}.` : "Aucune retouche. Ce qui est réglé ici s'applique à chaque épisode, puis au film." }));
+  card.append(h("p", { class: "film-state", text: m.summary ? `${capitalize(m.summary)}${rendered}.` : `Montage par défaut : ${m.default_summary}${rendered}. Ce qui est réglé ici s'applique à chaque épisode, puis au film.` }));
   if (m.error) card.append(h("div", { class: "notice is-warning" }, icon("alert", { size: 20 }), h("p", { text: `montage.json n'a pas pu être lu : ${m.error}` })));
 
   const change = (fn) => { fn(r); ui.saveMontage(); };
@@ -684,6 +703,40 @@ function montageSection(ctx, group, detail, ui) {
       seconds("Couper au début", r.trim.start, (e) => change((x) => { x.trim.start = Math.max(0, Number(e.target.value) || 0); })),
       seconds("Couper à la fin", r.trim.end, (e) => change((x) => { x.trim.end = Math.max(0, Number(e.target.value) || 0); })),
       choice("Vitesse", speeds.map((s) => [s, s === 1 ? "Normale" : `×${num(s)}`]), r.speed, (e) => change((x) => { x.speed = Number(e.target.value); })))));
+
+  // Effets : activés par défaut ; chacun se coupe à sa valeur neutre (0, Aucun…).
+  const length = (label, value, onchange) =>
+    h("input", { class: "text-field num-field", type: "number", min: 0.5, max: 10, step: 0.5, value, "aria-label": label, onchange });
+  const sc = r.staccato;
+  card.append(h("div", { class: "montage-grid" },
+    h("div", { class: "montage-group" },
+      h("h3", { class: "overline", text: "Effets image" }),
+      choice("Zoom", steps(ZOOMS, r.zoom, (z) => (z ? `${num(z)} %` : "Aucun")), r.zoom, (e) => change((x) => { x.zoom = Number(e.target.value); })),
+      choice("Température", steps(TEMPERATURES, r.grade.temperature, (t) => `${signed(t)} (${t < 0 ? "bleu" : "orange"})`), r.grade.temperature, (e) => change((x) => { x.grade.temperature = Number(e.target.value); })),
+      choice("Courbe", Object.entries(CURVES), r.grade.curve, (e) => change((x) => { x.grade.curve = e.target.value; })),
+      choice("Grain", steps(GRAINS, r.grain, (g) => num(g)), r.grain, (e) => change((x) => { x.grain = Number(e.target.value); }))),
+    h("div", { class: "montage-group" },
+      h("h3", { class: "overline", text: "Rythme" }),
+      choice("Découpe rapide", Object.entries(TRANSITIONS), sc.transition, (e) => change((x) => { x.staccato.transition = e.target.value; })),
+      sc.transition === "aucune" ? null : h("label", { class: "form-row" }, h("span", { text: "Segments de" }),
+        h("span", {},
+          length("Durée minimale d'un segment", sc.min, (e) => change((x) => { x.staccato.min = Math.min(10, Math.max(0.5, Number(e.target.value) || 1)); x.staccato.max = Math.max(x.staccato.max, x.staccato.min); })),
+          " à ",
+          length("Durée maximale d'un segment", sc.max, (e) => change((x) => { x.staccato.max = Math.min(10, Math.max(0.5, Number(e.target.value) || 2)); x.staccato.min = Math.min(x.staccato.min, x.staccato.max); })),
+          " s")),
+      choice("Tempo", steps(STRETCHES, r.stretch, (v) => (v ? `${signed(v)} %` : "Inchangé")), r.stretch, (e) => change((x) => { x.stretch = Number(e.target.value); })),
+      h("p", { class: "note", text: "La découpe rapide marque chaque coupe (zoom rapproché un segment sur deux, flash ou noir de 2 images) sans rien retirer ; le tempo accélère (ou ralentit) tout, son compris." })),
+    h("div", { class: "montage-group" },
+      h("h3", { class: "overline", text: "Son" }),
+      choice("Hauteur", steps(PITCHES, r.audio.pitch, (v) => (v ? `${signed(v)} demi-ton` : "Inchangée")), r.audio.pitch, (e) => change((x) => { x.audio.pitch = Number(e.target.value); })),
+      choice("Égaliseur", Object.entries(EQS), r.audio.eq, (e) => change((x) => { x.audio.eq = e.target.value; })),
+      choice("Fond sonore", Object.entries(BEDS), r.audio.bed, (e) => change((x) => { x.audio.bed = e.target.value; })),
+      r.audio.bed !== "aucun"
+        ? choice("Niveau du fond", steps(BED_LEVELS, r.audio.bed_level, (v) => `${num(v)} dB`), r.audio.bed_level, (e) => change((x) => { x.audio.bed_level = Number(e.target.value); }))
+        : null)));
+  card.append(h("div", { class: "btn-row" },
+    h("button", { class: "btn btn-sm btn-ghost", type: "button", onclick: () => change((x) => { for (const [k, v] of Object.entries(m.effects_off)) x[k] = typeof v === "object" ? { ...x[k], ...v } : v; }) }, "Couper tous les effets"),
+    h("button", { class: "btn btn-sm btn-ghost", type: "button", onclick: () => change((x) => { for (const k of Object.keys(m.effects_off)) x[k] = structuredClone(m.defaults[k]); }) }, "Effets par défaut")));
 
   // Passages d'un épisode : accélérés ou coupés (temps de l'épisode d'origine).
   const lines = passageLines(r);
@@ -745,7 +798,7 @@ function montageSection(ctx, group, detail, ui) {
   if (ui.montageFilmError) card.append(h("div", { class: "notice is-danger", role: "alert" }, icon("alert", { size: 20 }), h("p", { text: ui.montageFilmError })));
   card.append(
     h("div", { class: "remedy" },
-      h("button", { class: "btn btn-lg btn-primary", type: "button", disabled: !m.recipe || filmJob || detail.job || null, onclick: () => ui.createMontageFilm() }, icon("film"), "Créer le film monté"),
+      h("button", { class: "btn btn-lg btn-primary", type: "button", disabled: filmJob || detail.job || null, onclick: () => ui.createMontageFilm() }, icon("film"), "Créer le film monté"),
       h("span", { class: "remedy-note", text: filmJob ? "Un film est en préparation (voir Film)." : "Chaque épisode est retouché une fois, puis le film est assemblé en quelques secondes. Il remplace le film actuel." })),
     h("div", { class: "btn-row" },
       m.recipe ? h("button", { class: "btn btn-ghost", type: "button", onclick: () => ui.deleteMontage() }, "Retirer le montage") : null),
