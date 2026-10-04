@@ -408,9 +408,7 @@ def _montage_film_job(app: "App", key: str, summary: dict, folder: Path, params:
         raise ApiError(422, "invalid_input", "Le montage ré-encode déjà chaque épisode : pas de « reencode ».", {"field": "reencode"})
     try:
         app.runner.find_ffmpeg(app.settings["ffmpeg_path"])
-        recipe = montage.load(folder)
-        if recipe is None:
-            raise montage.RecipeError("", "Pas de montage pour cette série : règle-le d'abord.")
+        recipe = montage.recipe_of(folder)  # none saved: the default montage
         film.plan_film(folder, params["allow_missing"])
     except film.FilmError as e:
         raise ApiError(_FILM_STATUS.get(e.code, 422), e.code, str(e)) from None
@@ -436,8 +434,15 @@ def montage_state(app: "App", key: str) -> dict:
         "recipe": recipe,
         "error": error,
         "summary": montage.describe(recipe) if recipe else None,
+        "default_summary": montage.describe(montage.validate({})),  # what a film gets with no recipe saved
+        "neutral": montage.is_neutral(recipe or montage.validate({})),  # a montage film would change nothing
         "defaults": montage.DEFAULT,
         "looks": list(montage.LOOKS),
+        "effects_off": montage.EFFECTS_OFF,
+        "curves": list(montage.CURVES),
+        "transitions": list(montage.TRANSITIONS),
+        "eqs": list(montage.EQS),
+        "beds": list(montage.BEDS),
         "encoders": list(montage.ENCODERS),
         "qualities": list(montage.QUALITIES),
         "rendered": status["rendered"],

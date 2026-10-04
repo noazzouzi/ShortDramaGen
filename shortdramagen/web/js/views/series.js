@@ -471,9 +471,14 @@ function filmSection(ctx, group, detail, ui) {
       : film.state === "partial"
         ? `Film partiel (épisodes ${film.episodes}) : ${film.file}${facts ? ` · ${facts}` : ""}`
         : `Film obsolète (épisodes ${film.episodes}) : ${film.added_since?.length ? `${plural(film.added_since.length, "épisode ajouté", "épisodes ajoutés")} depuis (${ranges(film.added_since)})` : "des épisodes ont changé depuis sa création"}.`;
+    const edit = montageEdit(ui);
     card.append(
       h("p", { class: "film-state", text: sentence }),
-      film.montage ? h("p", { class: "note", text: `Film monté : ${film.montage}.` }) : null,
+      film.montage
+        ? h("p", { class: "note", text: `Film monté : ${film.montage}.` })
+        : edit ? h("div", { class: "notice is-info" }, icon("info", { size: 20 }),
+            h("div", {}, h("p", { text: `Film brut : le montage n'y est pas appliqué (${edit}).` }),
+              h("button", { class: "btn btn-sm btn-secondary", type: "button", disabled: detail.job || null, onclick: () => ui.createMontageFilm() }, icon("film", { size: 14 }), "Créer le film monté"))) : null,
       h("div", { class: "btn-row" },
         h("a", { class: "btn btn-primary", href: theaterHref(group, detail, "film") }, icon("play"), "Regarder le film"),
         h("button", { class: "btn btn-secondary", type: "button", onclick: () => ctx.act.open(key, "film") }, icon("folder"), "Afficher dans le dossier"),
@@ -520,6 +525,7 @@ function filmSection(ctx, group, detail, ui) {
   }
   const c = plan.checks;
   const opts = ui.filmOptions;
+  const edit = montageEdit(ui); // résumé du montage s'il change quelque chose, sinon null : le film brut reste l'action principale
   const outputName = opts.output_name || c.output.name;
   // Un film obsolète ou partiel sous le même nom est remplacé sans case à cocher.
   const implicitReplace = ["stale", "partial"].includes(film?.state) && outputName === film.file;
@@ -535,6 +541,9 @@ function filmSection(ctx, group, detail, ui) {
       h("span", { class: "prevol-detail" }, c.output.exists ? `${implicitReplace ? "Remplace le film actuel" : "Un film porte déjà ce nom"} : ${outputName}` : outputName, " ",
         h("button", { class: "link-btn", type: "button", onclick: () => { ui.editName = !ui.editName; ctx.rerender(); }, text: ui.editName ? "Fermer" : "Modifier" }), nameEdit)),
     preflightRow(opts.chapters ? true : null, "Chapitres", opts.chapters ? `${plural(c.chapters, "chapitre", "chapitres")} « Épisode N »` : "sans chapitres"),
+    h("li", { class: `prevol-row is-${edit ? "ok" : "info"}` }, icon(edit ? "check" : "info", { size: 20 }), h("span", { class: "prevol-label", text: "Montage" }),
+      h("span", { class: "prevol-detail" }, edit ? capitalize(edit) : ui.montage ? "aucun effet : film brut" : "chargement…", " ",
+        h("a", { class: "link-btn", href: "#montage", onclick: (e) => { e.preventDefault(); document.getElementById("montage")?.scrollIntoView({ behavior: "smooth" }); }, text: "Régler" }))),
   ];
   card.append(h("ul", { class: "prevol" }, rows));
   const replaceBox = c.output.exists && !implicitReplace
@@ -560,10 +569,17 @@ function filmSection(ctx, group, detail, ui) {
   };
   const remedies = h("div", { class: "remedies" });
   const blockedByName = c.output.exists && !opts.replace && !(film && ["stale", "partial"].includes(film.state));
+  const plainClass = edit ? "btn btn-secondary" : "btn btn-lg btn-primary";
+  if (edit && c.ffmpeg.ok && (c.episodes.ok || opts.allow_missing)) {
+    // Le montage met chaque épisode à la taille de la série : des qualités mélangées ne le bloquent pas.
+    remedies.append(h("div", { class: "remedy" },
+      h("button", { class: "btn btn-lg btn-primary", type: "button", onclick: async () => { await ui.flushMontage(); create({ montage: true, reencode: false }); } }, icon("film"), film ? "Recréer le film monté" : "Créer le film monté"),
+      h("span", { class: "remedy-note", text: `Avec le montage ci-dessus : chaque épisode est retouché (plusieurs minutes), puis le film est assemblé.${c.format.ok ? "" : " Les qualités différentes sont mises à la même taille."}` })));
+  }
   if (plan.can_build && c.ffmpeg.ok) {
     remedies.append(h("div", { class: "remedy" },
-      h("button", { class: "btn btn-lg btn-primary", type: "button", disabled: blockedByName || null, onclick: () => create() }, icon("film"), film ? "Recréer le film complet" : "Créer le film"),
-      blockedByName ? h("span", { class: "remedy-note", text: "Coche « Remplacer » ou change le nom." }) : h("span", { class: "remedy-note", text: `Réunit ${plural(c.episodes.present, "épisode", "épisodes")} en un seul fichier${plan.duration_s ? ` (${duration(plan.duration_s)})` : ""}, en quelques secondes.` })));
+      h("button", { class: plainClass, type: "button", disabled: blockedByName || null, onclick: () => create() }, icon("film"), edit ? "Film brut, sans les effets" : film ? "Recréer le film complet" : "Créer le film"),
+      blockedByName ? h("span", { class: "remedy-note", text: "Coche « Remplacer » ou change le nom." }) : h("span", { class: "remedy-note", text: `Réunit ${plural(c.episodes.present, "épisode", "épisodes")} en un seul fichier${plan.duration_s ? ` (${duration(plan.duration_s)})` : ""}, en quelques secondes${edit ? ", sans le montage" : ""}.` })));
   }
   for (const fix of plan.fixes || []) {
     if (fix.action === "repair_then_film") {
@@ -571,9 +587,9 @@ function filmSection(ctx, group, detail, ui) {
       if (fix.download?.length) parts.push(`télécharge ${ranges(fix.download)}`);
       if (fix.redownload?.length) parts.push(`retélécharge ${ranges(fix.redownload)} en ${fix.quality}`);
       remedies.append(h("div", { class: "remedy" },
-        h("button", { class: "btn btn-lg btn-primary", type: "button", onclick: () => ctx.act.retry(key, { episodes: fix.download?.length ? fix.download : null, redownload: fix.redownload, quality: fix.quality, film_after: true }, "Réparation puis film") },
+        h("button", { class: plainClass, type: "button", onclick: () => ctx.act.retry(key, { episodes: fix.download?.length ? fix.download : null, redownload: fix.redownload, quality: fix.quality, film_after: true }, "Réparation puis film") },
           icon("refresh"), fix.label),
-        h("span", { class: "remedy-note", text: `${capitalize(parts.join(", "))}, puis crée le film.` })));
+        h("span", { class: "remedy-note", text: `${capitalize(parts.join(", "))}, puis crée le film${edit ? " brut, sans le montage" : ""}.` })));
     } else if (fix.action === "allow_missing") {
       remedies.append(h("div", { class: "remedy" },
         h("button", { class: "btn btn-secondary", type: "button", disabled: !c.ffmpeg.ok || null, onclick: () => create({ allow_missing: true, replace: true }) }, fix.label),
@@ -581,7 +597,7 @@ function filmSection(ctx, group, detail, ui) {
     } else if (fix.action === "reencode") {
       remedies.append(h("div", { class: "remedy" },
         h("button", { class: "btn btn-secondary", type: "button", disabled: !fix.enabled || !c.ffmpeg.ok || null, "aria-describedby": fix.reason ? `raison-${fix.action}` : null, onclick: () => create({ reencode: true }) }, fix.label),
-        fix.reason ? h("span", { class: "remedy-note", id: `raison-${fix.action}`, text: fix.reason }) : null));
+        fix.reason || edit ? h("span", { class: "remedy-note", id: `raison-${fix.action}`, text: [fix.reason, edit ? "Film brut, sans le montage." : null].filter(Boolean).join(" ") }) : null));
     }
   }
   card.append(remedies);
@@ -600,6 +616,25 @@ function filmSection(ctx, group, detail, ui) {
 
 const LOOKS = { aucun: "Aucun", vif: "Couleurs vives", doux: "Doux", nb: "Noir et blanc" };
 const SPEEDS = [1, 1.1, 1.25, 1.5, 2];
+// Effets (activés par défaut, voir montage.DEFAULT) : valeurs proposées dans les listes.
+const ZOOMS = [0, 3, 4, 5, 8];
+const TEMPERATURES = [[-60, "Bleu marqué"], [-30, "Plus froid (bleu)"], [0, "Neutre"], [30, "Plus chaud (orange)"], [60, "Orange marqué"]];
+const CURVES = { aucune: "Aucune", douce: "Douce (noirs relevés)", contraste: "Contrastée (en S)" };
+const GRAINS = [[0, "Aucun"], [2, "Très fin (2)"], [4, "Fin (4)"], [6, "Visible (6, fichiers plus gros)"]];
+const TRANSITIONS = { aucune: "Aucune", zoom: "Zoom rapproché", flash: "Flash (2 images)", noir: "Noir (2 images)" };
+const STRETCHES = [-3, -2, 0, 2, 3];
+const PITCHES = [-1, -0.5, 0, 0.5, 1];
+const EQS = { aucun: "Aucun", shelf: "Shelf (graves et aigus atténués)", notch: "Notch (deux fréquences creusées)" };
+const BEDS = { aucun: "Aucun", blanc: "Bruit blanc", vent: "Vent léger", basse: "Nappe de basse sourde" };
+const BED_LEVELS = [-50, -45, -40, -35, -30];
+
+const signed = (x) => (x > 0 ? `+${num(x)}` : num(x));
+
+// Options d'une liste, la valeur actuelle ajoutée si elle n'y est pas (réglée en CLI par exemple).
+function steps(list, value, label) {
+  const pairs = list.map((x) => (Array.isArray(x) ? x : [x, label(x)]));
+  return pairs.some(([v]) => v === value) ? pairs : [...pairs, [value, label(value)]].sort((a, b) => a[0] - b[0]);
+}
 const PASSAGE_SPEEDS = [1.25, 1.5, 2, 3];
 
 const num = (x) => String(Math.round(x * 100) / 100).replace(".", ",");
@@ -633,6 +668,17 @@ function passageLines(recipe) {
   return out;
 }
 
+// Ce que le film monté appliquerait (recette enregistrée, sinon montage par défaut), ou null s'il ne changerait rien.
+function montageEdit(ui) {
+  const m = ui.montage;
+  if (!m) {
+    ui.loadMontage();
+    return null;
+  }
+  if (m.loadError || m.error || m.neutral) return null;
+  return m.summary || m.default_summary;
+}
+
 function montageSection(ctx, group, detail, ui) {
   const key = detail.series_key;
   const card = h("section", { class: "card montage-card", id: "montage", "aria-labelledby": "titre-montage" });
@@ -656,7 +702,7 @@ function montageSection(ctx, group, detail, ui) {
   const filmJob = ctx.state.jobs.active.find((j) => j.kind === "film" && j.series_key === key);
   if (m.recipe) title.append(h("span", { class: "badge badge-info", text: "Réglé" }));
   const rendered = m.rendered ? ` · ${plural(m.rendered, "épisode déjà monté", "épisodes déjà montés")} (${bytes(m.rendered_bytes)})` : "";
-  card.append(h("p", { class: "film-state", text: m.summary ? `${capitalize(m.summary)}${rendered}.` : "Aucune retouche. Ce qui est réglé ici s'applique à chaque épisode, puis au film." }));
+  card.append(h("p", { class: "film-state", text: m.summary ? `${capitalize(m.summary)}${rendered}.` : `Montage par défaut : ${m.default_summary}${rendered}. Ce qui est réglé ici s'applique à chaque épisode, puis au film.` }));
   if (m.error) card.append(h("div", { class: "notice is-warning" }, icon("alert", { size: 20 }), h("p", { text: `montage.json n'a pas pu être lu : ${m.error}` })));
 
   const change = (fn) => { fn(r); ui.saveMontage(); };
@@ -684,6 +730,40 @@ function montageSection(ctx, group, detail, ui) {
       seconds("Couper au début", r.trim.start, (e) => change((x) => { x.trim.start = Math.max(0, Number(e.target.value) || 0); })),
       seconds("Couper à la fin", r.trim.end, (e) => change((x) => { x.trim.end = Math.max(0, Number(e.target.value) || 0); })),
       choice("Vitesse", speeds.map((s) => [s, s === 1 ? "Normale" : `×${num(s)}`]), r.speed, (e) => change((x) => { x.speed = Number(e.target.value); })))));
+
+  // Effets : activés par défaut ; chacun se coupe à sa valeur neutre (0, Aucun…).
+  const length = (label, value, onchange) =>
+    h("input", { class: "text-field num-field", type: "number", min: 0.5, max: 10, step: 0.5, value, "aria-label": label, onchange });
+  const sc = r.staccato;
+  card.append(h("div", { class: "montage-grid" },
+    h("div", { class: "montage-group" },
+      h("h3", { class: "overline", text: "Effets image" }),
+      choice("Zoom", steps(ZOOMS, r.zoom, (z) => (z ? `${num(z)} %` : "Aucun")), r.zoom, (e) => change((x) => { x.zoom = Number(e.target.value); })),
+      choice("Température", steps(TEMPERATURES, r.grade.temperature, (t) => `${signed(t)} (${t < 0 ? "bleu" : "orange"})`), r.grade.temperature, (e) => change((x) => { x.grade.temperature = Number(e.target.value); })),
+      choice("Courbe", Object.entries(CURVES), r.grade.curve, (e) => change((x) => { x.grade.curve = e.target.value; })),
+      choice("Grain", steps(GRAINS, r.grain, (g) => num(g)), r.grain, (e) => change((x) => { x.grain = Number(e.target.value); }))),
+    h("div", { class: "montage-group" },
+      h("h3", { class: "overline", text: "Rythme" }),
+      choice("Découpe rapide", Object.entries(TRANSITIONS), sc.transition, (e) => change((x) => { x.staccato.transition = e.target.value; })),
+      sc.transition === "aucune" ? null : h("label", { class: "form-row" }, h("span", { text: "Segments de" }),
+        h("span", {},
+          length("Durée minimale d'un segment", sc.min, (e) => change((x) => { x.staccato.min = Math.min(10, Math.max(0.5, Number(e.target.value) || 1)); x.staccato.max = Math.max(x.staccato.max, x.staccato.min); })),
+          " à ",
+          length("Durée maximale d'un segment", sc.max, (e) => change((x) => { x.staccato.max = Math.min(10, Math.max(0.5, Number(e.target.value) || 2)); x.staccato.min = Math.min(x.staccato.min, x.staccato.max); })),
+          " s")),
+      choice("Tempo", steps(STRETCHES, r.stretch, (v) => (v ? `${signed(v)} %` : "Inchangé")), r.stretch, (e) => change((x) => { x.stretch = Number(e.target.value); })),
+      h("p", { class: "note", text: "La découpe rapide marque chaque coupe (zoom rapproché un segment sur deux, flash ou noir de 2 images) sans rien retirer ; le tempo accélère (ou ralentit) tout, son compris." })),
+    h("div", { class: "montage-group" },
+      h("h3", { class: "overline", text: "Son" }),
+      choice("Hauteur", steps(PITCHES, r.audio.pitch, (v) => (v ? `${signed(v)} demi-ton` : "Inchangée")), r.audio.pitch, (e) => change((x) => { x.audio.pitch = Number(e.target.value); })),
+      choice("Égaliseur", Object.entries(EQS), r.audio.eq, (e) => change((x) => { x.audio.eq = e.target.value; })),
+      choice("Fond sonore", Object.entries(BEDS), r.audio.bed, (e) => change((x) => { x.audio.bed = e.target.value; })),
+      r.audio.bed !== "aucun"
+        ? choice("Niveau du fond", steps(BED_LEVELS, r.audio.bed_level, (v) => `${num(v)} dB`), r.audio.bed_level, (e) => change((x) => { x.audio.bed_level = Number(e.target.value); }))
+        : null)));
+  card.append(h("div", { class: "btn-row" },
+    h("button", { class: "btn btn-sm btn-ghost", type: "button", onclick: () => change((x) => { for (const [k, v] of Object.entries(m.effects_off)) x[k] = typeof v === "object" ? { ...x[k], ...v } : v; }) }, "Couper tous les effets"),
+    h("button", { class: "btn btn-sm btn-ghost", type: "button", onclick: () => change((x) => { for (const k of Object.keys(m.effects_off)) x[k] = structuredClone(m.defaults[k]); }) }, "Effets par défaut")));
 
   // Passages d'un épisode : accélérés ou coupés (temps de l'épisode d'origine).
   const lines = passageLines(r);
@@ -745,7 +825,7 @@ function montageSection(ctx, group, detail, ui) {
   if (ui.montageFilmError) card.append(h("div", { class: "notice is-danger", role: "alert" }, icon("alert", { size: 20 }), h("p", { text: ui.montageFilmError })));
   card.append(
     h("div", { class: "remedy" },
-      h("button", { class: "btn btn-lg btn-primary", type: "button", disabled: !m.recipe || filmJob || detail.job || null, onclick: () => ui.createMontageFilm() }, icon("film"), "Créer le film monté"),
+      h("button", { class: "btn btn-lg btn-primary", type: "button", disabled: filmJob || detail.job || null, onclick: () => ui.createMontageFilm() }, icon("film"), "Créer le film monté"),
       h("span", { class: "remedy-note", text: filmJob ? "Un film est en préparation (voir Film)." : "Chaque épisode est retouché une fois, puis le film est assemblé en quelques secondes. Il remplace le film actuel." })),
     h("div", { class: "btn-row" },
       m.recipe ? h("button", { class: "btn btn-ghost", type: "button", onclick: () => ui.deleteMontage() }, "Retirer le montage") : null),

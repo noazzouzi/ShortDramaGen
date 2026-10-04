@@ -66,8 +66,97 @@ d'origine est récupéré **en image**, dans la même passe ffmpeg :
   maintenant `-/filter_complex` à partir de ffmpeg 7 (`film.filter_script_args`).
 
 **Pas encore fait** (V2 de la proposition) : marquer les passages dans le
-lecteur, plusieurs rendus en parallèle, zoom, volume et fondus, préréglages de
+lecteur, plusieurs rendus en parallèle, volume et fondus, préréglages de
 l'utilisateur.
+
+### 0.1 Effets activés par défaut (04/10/2026)
+
+**Demande de l'utilisateur** : avant le rendu du film, une série d'effets de
+montage, **activés par défaut** : hauteur du son, fond sonore discret,
+tempo, égaliseur, zoom, miroir, étalonnage, grain et découpe rapide. Le
+miroir existait déjà : il est maintenant actif par défaut, avec les
+sous-titres incrustés gardés lisibles.
+
+| Effet | Recette (défaut) | Réalisation ffmpeg | Coupé par |
+|---|---|---|---|
+| Hauteur du son | `audio.pitch` : +0,5 demi-ton (−3 à 3) | `asetrate` à 44 100 × 2^(p/12), `aresample`, puis `atempo` inverse : la durée ne change pas | `0` |
+| Fond sonore | `audio.bed` : `vent` (`blanc`, `basse`), `audio.bed_level` : −40 dB (−60 à −20) | `anoisesrc` (bruit blanc ; bruit brun filtré à 500 Hz et modulé lentement pour le vent) ou `aevalsrc` (55 et 82,5 Hz filtrés à 200 Hz pour la basse), ramené à son niveau RMS, puis `amerge` + `pan` sous le son | `aucun` |
+| Tempo | `stretch` : +3 % (−10 à 10) | multiplie la vitesse de chaque partie (globale et passages) : `setpts` et `atempo`, son compris | `0` |
+| Égaliseur | `audio.eq` : `shelf` (`notch`) | shelf : −8 dB sous 120 Hz et au-dessus de 7 kHz (`bass`, `treble`) ; notch : −18 dB à 950 Hz et 2,9 kHz (`equalizer`, Q 4) | `aucun` |
+| Zoom | `zoom` : 4 % (0 à 15) | `crop` centré, tailles paires, puis `scale` à la taille de la série | `0` |
+| Miroir | `mirror` : oui | inchangé (voir plus haut) | `--no-mirror` |
+| Étalonnage | `grade.temperature` : +30 (−100 bleu à 100 orange), `grade.curve` : `douce` (`contraste`) | un seul `lutyuv` : U − t/10 et V + t/10 (vers l'orange), courbe de luma (douce : noirs relevés, blancs adoucis ; contraste : courbe en S) | `0`, `aucune` |
+| Grain | `grain` : 4 (0 à 20) | `noise=c0s=4:c0f=t` : bruit temporel sur la luma seule | `0` |
+| Découpe rapide | `staccato.transition` : `zoom` (`flash`, `noir`), segments de `min` 1 à `max` 2 s | voir ci-dessous | `aucune` |
+
+**Découpe rapide.** Une série reste une histoire : rien n'est retiré. Chaque
+épisode est découpé en segments de 1 à 2 s de sortie, tirés par un
+générateur initialisé avec le numéro de l'épisode (les mêmes coupes à chaque
+rendu, et dans l'aperçu). À chaque coupe :
+- `zoom` (défaut) : un segment sur deux est montré 8 % plus près (copie
+  zoomée posée par `overlay` avec `enable`). C'est l'effet de coupe des
+  formats courts, sans flash.
+- `flash` : 2 images éclaircies (`lutyuv` avec `enable`).
+- `noir` : 2 images noires (`drawbox` avec `enable`).
+
+Les « inserts d'autres contenus » ne sont pas faits : il n'y a pas d'autre
+contenu à insérer.
+
+**Ordre des étapes.** Son : tempo (par partie) → hauteur → égaliseur →
+fond. Image : miroir (et sous-titres recollés) → zoom et découpe → look `eq` →
+étalonnage → grain → flash ou noir → `format=yuv420p`. Le zoom vient après
+le miroir : la bande des sous-titres reste mesurée sur l'image d'origine.
+
+**Recettes existantes.** Une clé absente prend sa valeur par défaut : une
+recette enregistrée avant ces effets les reçoit, et chaque épisode est
+refait une fois (l'empreinte inclut les effets et les coupes). Pour revenir
+au montage d'avant : `sdg montage set <série> --no-effects` (ou « Couper tous
+les effets » dans la carte). `grade`, `staccato` et `audio` se complètent clé
+par clé : `{"audio": {"bed": "aucun"}}` garde la hauteur et l'égaliseur.
+
+**Sans recette.** `sdg film --montage`, `sdg montage render` et le bouton
+« Créer le film monté » appliquent le montage par défaut quand la série n'a
+pas de `montage.json`. Le film brut (`sdg film`) reste une simple fusion sans
+ré-encodage.
+
+**Carte « Film »** : elle affiche une ligne « Montage » (ce qui sera
+appliqué, lien « Régler ») et, dès que le montage change quelque chose, son
+bouton principal est « Créer le film monté ». Les autres actions (« Film
+brut, sans les effets », « Réparer puis créer le film », « Créer quand
+même ») restent en second et disent qu'elles ne l'appliquent pas. Le
+montage met chaque épisode à la taille de la série : des qualités mélangées
+(720p parmi des 540p) ne demandent ni retéléchargement ni ré-encodage du
+film. Un film brut déjà prêt est signalé (« Film brut : le montage n'y est
+pas appliqué »), un film monté affiche « Film monté : … ». L'API ajoute
+`neutral` à l'état du montage : vrai quand le film monté ne changerait rien.
+
+**Graphes longs.** Un épisode long avec la découpe en flash peut dépasser
+16 Kio de graphe : il passe alors par un fichier (`film.filter_script_args`).
+
+**Mesures** (épisode 1 de « Qui Est la Véritable Mme Lafont ? », 30 s en
+1080x1920, x264 veryfast, 4 cœurs lents) :
+
+| Recette | Temps | Taille |
+|---|---|---|
+| Ré-encodage seul | 13,4 s | 7,7 Mo |
+| Miroir + sous-titres (montage d'avant) | 22,3 s | 8,6 Mo |
+| Défaut (miroir + effets) | 29,9 s | 9,0 Mo |
+| Défaut sans grain | 28,4 s | 8,9 Mo |
+| Défaut sans découpe rapide | 26,6 s | 8,7 Mo |
+| Défaut sans effets sur le son | 30,4 s | 9,0 Mo |
+
+Les effets coûtent donc environ un tiers de temps en plus que le miroir
+seul, surtout pour la découpe (une seconde mise à l'échelle par image) ; ceux
+du son ne se mesurent pas (écart dans le bruit de la mesure). Le
+grain grossit vite les fichiers au-delà de 5 : sur 30 s, +3 % à 4, ×2 à 6,
+×6 à 8. Film réel de 2 épisodes (263 s de source) : 4 min 15 s en sortie
+(tempo +3 %), 92 Mo, sous-titres repérés entre 61 et 72 % de la hauteur.
+Hauteur vérifiée sur une sinusoïde : 440 Hz → 452,8 Hz (attendu 452,9).
+
+**Limites.** Comme pour le miroir seul, un carton de titre coloré ou
+vertical est retourné. Le zoom de la découpe (12 % au total) peut rogner la
+première et la dernière lettre d'un sous-titre très large. Ces effets ne
+changent rien au statut des vidéos : l'avertissement du README vaut toujours.
 
 ## 1. Résumé de la recommandation (proposition d'origine)
 
