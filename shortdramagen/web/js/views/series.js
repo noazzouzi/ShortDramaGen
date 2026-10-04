@@ -471,9 +471,14 @@ function filmSection(ctx, group, detail, ui) {
       : film.state === "partial"
         ? `Film partiel (épisodes ${film.episodes}) : ${film.file}${facts ? ` · ${facts}` : ""}`
         : `Film obsolète (épisodes ${film.episodes}) : ${film.added_since?.length ? `${plural(film.added_since.length, "épisode ajouté", "épisodes ajoutés")} depuis (${ranges(film.added_since)})` : "des épisodes ont changé depuis sa création"}.`;
+    const edit = montageEdit(ui);
     card.append(
       h("p", { class: "film-state", text: sentence }),
-      film.montage ? h("p", { class: "note", text: `Film monté : ${film.montage}.` }) : null,
+      film.montage
+        ? h("p", { class: "note", text: `Film monté : ${film.montage}.` })
+        : edit ? h("div", { class: "notice is-info" }, icon("info", { size: 20 }),
+            h("div", {}, h("p", { text: `Film brut : le montage n'y est pas appliqué (${edit}).` }),
+              h("button", { class: "btn btn-sm btn-secondary", type: "button", disabled: detail.job || null, onclick: () => ui.createMontageFilm() }, icon("film", { size: 14 }), "Créer le film monté"))) : null,
       h("div", { class: "btn-row" },
         h("a", { class: "btn btn-primary", href: theaterHref(group, detail, "film") }, icon("play"), "Regarder le film"),
         h("button", { class: "btn btn-secondary", type: "button", onclick: () => ctx.act.open(key, "film") }, icon("folder"), "Afficher dans le dossier"),
@@ -520,6 +525,7 @@ function filmSection(ctx, group, detail, ui) {
   }
   const c = plan.checks;
   const opts = ui.filmOptions;
+  const edit = montageEdit(ui); // résumé du montage s'il change quelque chose, sinon null : le film brut reste l'action principale
   const outputName = opts.output_name || c.output.name;
   // Un film obsolète ou partiel sous le même nom est remplacé sans case à cocher.
   const implicitReplace = ["stale", "partial"].includes(film?.state) && outputName === film.file;
@@ -535,6 +541,9 @@ function filmSection(ctx, group, detail, ui) {
       h("span", { class: "prevol-detail" }, c.output.exists ? `${implicitReplace ? "Remplace le film actuel" : "Un film porte déjà ce nom"} : ${outputName}` : outputName, " ",
         h("button", { class: "link-btn", type: "button", onclick: () => { ui.editName = !ui.editName; ctx.rerender(); }, text: ui.editName ? "Fermer" : "Modifier" }), nameEdit)),
     preflightRow(opts.chapters ? true : null, "Chapitres", opts.chapters ? `${plural(c.chapters, "chapitre", "chapitres")} « Épisode N »` : "sans chapitres"),
+    h("li", { class: `prevol-row is-${edit ? "ok" : "info"}` }, icon(edit ? "check" : "info", { size: 20 }), h("span", { class: "prevol-label", text: "Montage" }),
+      h("span", { class: "prevol-detail" }, edit ? capitalize(edit) : ui.montage ? "aucun effet : film brut" : "chargement…", " ",
+        h("a", { class: "link-btn", href: "#montage", onclick: (e) => { e.preventDefault(); document.getElementById("montage")?.scrollIntoView({ behavior: "smooth" }); }, text: "Régler" }))),
   ];
   card.append(h("ul", { class: "prevol" }, rows));
   const replaceBox = c.output.exists && !implicitReplace
@@ -560,10 +569,17 @@ function filmSection(ctx, group, detail, ui) {
   };
   const remedies = h("div", { class: "remedies" });
   const blockedByName = c.output.exists && !opts.replace && !(film && ["stale", "partial"].includes(film.state));
+  const plainClass = edit ? "btn btn-secondary" : "btn btn-lg btn-primary";
+  if (edit && c.ffmpeg.ok && (c.episodes.ok || opts.allow_missing)) {
+    // Le montage met chaque épisode à la taille de la série : des qualités mélangées ne le bloquent pas.
+    remedies.append(h("div", { class: "remedy" },
+      h("button", { class: "btn btn-lg btn-primary", type: "button", onclick: async () => { await ui.flushMontage(); create({ montage: true, reencode: false }); } }, icon("film"), film ? "Recréer le film monté" : "Créer le film monté"),
+      h("span", { class: "remedy-note", text: `Avec le montage ci-dessus : chaque épisode est retouché (plusieurs minutes), puis le film est assemblé.${c.format.ok ? "" : " Les qualités différentes sont mises à la même taille."}` })));
+  }
   if (plan.can_build && c.ffmpeg.ok) {
     remedies.append(h("div", { class: "remedy" },
-      h("button", { class: "btn btn-lg btn-primary", type: "button", disabled: blockedByName || null, onclick: () => create() }, icon("film"), film ? "Recréer le film complet" : "Créer le film"),
-      blockedByName ? h("span", { class: "remedy-note", text: "Coche « Remplacer » ou change le nom." }) : h("span", { class: "remedy-note", text: `Réunit ${plural(c.episodes.present, "épisode", "épisodes")} en un seul fichier${plan.duration_s ? ` (${duration(plan.duration_s)})` : ""}, en quelques secondes.` })));
+      h("button", { class: plainClass, type: "button", disabled: blockedByName || null, onclick: () => create() }, icon("film"), edit ? "Film brut, sans les effets" : film ? "Recréer le film complet" : "Créer le film"),
+      blockedByName ? h("span", { class: "remedy-note", text: "Coche « Remplacer » ou change le nom." }) : h("span", { class: "remedy-note", text: `Réunit ${plural(c.episodes.present, "épisode", "épisodes")} en un seul fichier${plan.duration_s ? ` (${duration(plan.duration_s)})` : ""}, en quelques secondes${edit ? ", sans le montage" : ""}.` })));
   }
   for (const fix of plan.fixes || []) {
     if (fix.action === "repair_then_film") {
@@ -571,9 +587,9 @@ function filmSection(ctx, group, detail, ui) {
       if (fix.download?.length) parts.push(`télécharge ${ranges(fix.download)}`);
       if (fix.redownload?.length) parts.push(`retélécharge ${ranges(fix.redownload)} en ${fix.quality}`);
       remedies.append(h("div", { class: "remedy" },
-        h("button", { class: "btn btn-lg btn-primary", type: "button", onclick: () => ctx.act.retry(key, { episodes: fix.download?.length ? fix.download : null, redownload: fix.redownload, quality: fix.quality, film_after: true }, "Réparation puis film") },
+        h("button", { class: plainClass, type: "button", onclick: () => ctx.act.retry(key, { episodes: fix.download?.length ? fix.download : null, redownload: fix.redownload, quality: fix.quality, film_after: true }, "Réparation puis film") },
           icon("refresh"), fix.label),
-        h("span", { class: "remedy-note", text: `${capitalize(parts.join(", "))}, puis crée le film.` })));
+        h("span", { class: "remedy-note", text: `${capitalize(parts.join(", "))}, puis crée le film${edit ? " brut, sans le montage" : ""}.` })));
     } else if (fix.action === "allow_missing") {
       remedies.append(h("div", { class: "remedy" },
         h("button", { class: "btn btn-secondary", type: "button", disabled: !c.ffmpeg.ok || null, onclick: () => create({ allow_missing: true, replace: true }) }, fix.label),
@@ -581,7 +597,7 @@ function filmSection(ctx, group, detail, ui) {
     } else if (fix.action === "reencode") {
       remedies.append(h("div", { class: "remedy" },
         h("button", { class: "btn btn-secondary", type: "button", disabled: !fix.enabled || !c.ffmpeg.ok || null, "aria-describedby": fix.reason ? `raison-${fix.action}` : null, onclick: () => create({ reencode: true }) }, fix.label),
-        fix.reason ? h("span", { class: "remedy-note", id: `raison-${fix.action}`, text: fix.reason }) : null));
+        fix.reason || edit ? h("span", { class: "remedy-note", id: `raison-${fix.action}`, text: [fix.reason, edit ? "Film brut, sans le montage." : null].filter(Boolean).join(" ") }) : null));
     }
   }
   card.append(remedies);
@@ -650,6 +666,17 @@ function passageLines(recipe) {
     }));
   }
   return out;
+}
+
+// Ce que le film monté appliquerait (recette enregistrée, sinon montage par défaut), ou null s'il ne changerait rien.
+function montageEdit(ui) {
+  const m = ui.montage;
+  if (!m) {
+    ui.loadMontage();
+    return null;
+  }
+  if (m.loadError || m.error || m.neutral) return null;
+  return m.summary || m.default_summary;
 }
 
 function montageSection(ctx, group, detail, ui) {

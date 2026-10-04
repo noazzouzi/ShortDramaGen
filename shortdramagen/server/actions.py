@@ -435,6 +435,7 @@ def montage_state(app: "App", key: str) -> dict:
         "error": error,
         "summary": montage.describe(recipe) if recipe else None,
         "default_summary": montage.describe(montage.validate({})),  # what a film gets with no recipe saved
+        "neutral": montage.is_neutral(recipe or montage.validate({})),  # a montage film would change nothing
         "defaults": montage.DEFAULT,
         "looks": list(montage.LOOKS),
         "effects_off": montage.EFFECTS_OFF,

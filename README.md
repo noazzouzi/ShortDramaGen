@@ -111,7 +111,8 @@ python -m shortdramagen montage show goodshort:31000835255
   (`--pitch`), égaliseur shelf (`--eq shelf|notch`) et fond de vent à
   −40 dB (`--bed blanc|vent|basse`, `--bed-level`). Chacun se coupe à 0 ou
   `aucun` ; `--no-effects` les coupe tous. Sans recette, `film --montage`
-  applique ce montage par défaut ([06 — Montage §0.1](docs/06-montage.md#01-effets-activés-par-défaut-04102026)).
+  applique ce montage par défaut. Dans `sdg ui`, la carte « Film » montre
+  le montage appliqué et propose d'abord « Créer le film monté » ([06 — Montage §0.1](docs/06-montage.md#01-effets-activés-par-défaut-04102026)).
 - Le film monté **remplace** le film brut, qui se refait en quelques secondes.
 - **Durée** : environ 5 à 7 fois plus vite que la lecture (60 épisodes :
   15 à 25 min), puis quelques secondes d'assemblage. Tout est aussi réglable
@@ -258,7 +259,7 @@ donne sa durée (pour le contrôle) et, pour un épisode gratuit, sa vidéo (MP4
 ## Tests
 
 ```bash
-python -m unittest discover -s tests      # 223 tests, hors ligne, environ 32 s
+python -m unittest discover -s tests      # 224 tests, hors ligne, environ 35 s
 # (4 tests de fusion utilisent un vrai ffmpeg ; ils sont ignorés s'il est absent)
 ```
 

@@ -116,8 +116,19 @@ par clé : `{"audio": {"bed": "aucun"}}` garde la hauteur et l'égaliseur.
 
 **Sans recette.** `sdg film --montage`, `sdg montage render` et le bouton
 « Créer le film monté » appliquent le montage par défaut quand la série n'a
-pas de `montage.json`. Le film brut (`sdg film`, bouton « Créer le film »)
-reste une simple fusion sans ré-encodage.
+pas de `montage.json`. Le film brut (`sdg film`) reste une simple fusion sans
+ré-encodage.
+
+**Carte « Film »** : elle affiche une ligne « Montage » (ce qui sera
+appliqué, lien « Régler ») et, dès que le montage change quelque chose, son
+bouton principal est « Créer le film monté ». Les autres actions (« Film
+brut, sans les effets », « Réparer puis créer le film », « Créer quand
+même ») restent en second et disent qu'elles ne l'appliquent pas. Le
+montage met chaque épisode à la taille de la série : des qualités mélangées
+(720p parmi des 540p) ne demandent ni retéléchargement ni ré-encodage du
+film. Un film brut déjà prêt est signalé (« Film brut : le montage n'y est
+pas appliqué »), un film monté affiche « Film monté : … ». L'API ajoute
+`neutral` à l'état du montage : vrai quand le film monté ne changerait rien.
 
 **Graphes longs.** Un épisode long avec la découpe en flash peut dépasser
 16 Kio de graphe : il passe alors par un fichier (`film.filter_script_args`).

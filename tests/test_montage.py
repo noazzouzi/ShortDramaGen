@@ -417,11 +417,13 @@ class ApiTest(test_jobs.LiveTest):
         url = f"/api/series/{KEY}/montage"
         status, data = self.call("GET", url)
         self.assertEqual((status, data["recipe"], data["looks"]), (200, None, ["aucun", "vif", "doux", "nb"]))
-        self.assertEqual((data["default_summary"], data["effects_off"]["grain"]), (montage.describe(montage.DEFAULT), 0))
+        self.assertEqual((data["default_summary"], data["effects_off"]["grain"], data["neutral"]), (montage.describe(montage.DEFAULT), 0, False))
         status, data = self.call("PUT", url, {"mirror": True, "speed": 9})
         self.assertEqual((status, data["error"]["code"], data["error"]["details"]["field"]), (422, "invalid_input", "speed"))
         status, data = self.call("PUT", url, {"mirror": True, "trim": {"start": 3}, **montage.EFFECTS_OFF})
         self.assertEqual((status, data["summary"]), (200, "miroir (sous-titres gardés) · coupe 3 s au début, 0 s à la fin"))
+        self.assertTrue(self.call("PUT", url, {**montage.EFFECTS_OFF, "mirror": False})[1]["neutral"])  # the film card offers the plain film
+        self.call("PUT", url, {"mirror": True, "trim": {"start": 3}, **montage.EFFECTS_OFF})
         self.assertTrue((self.root / KEY / montage.RECIPE_FILE).exists())
 
         self.assertEqual(self.call("POST", f"/api/series/{KEY}/film", {"montage": True, "reencode": True})[0], 422)
@@ -544,3 +546,18 @@ class RealFfmpegTest(unittest.TestCase):
         ).stdout  # fmt: skip
         samples = list(struct.unpack(f"<{len(raw) // 2}h", raw))
         self.assertGreater(self.strength(samples, 880 * 2 ** (0.5 / 12)), 3 * self.strength(samples, 880))  # higher by half a tone
+
+    def test_mixed_qualities_need_no_redownload(self):
+        """An episode in another size (720p among 540p…) is brought to the series' size: the film is a plain copy."""
+        subprocess.run([
+            FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x404040:s=144x256:r=25:d=8",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=8", "-c:v", "libx264", "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(self.dir / "E002.mp4"),
+        ], check=True)  # fmt: skip
+        (self.dir / "manifest.json").write_text(json.dumps({"title": "Test", "episodes": [{"number": 1}, {"number": 2}]}), encoding="utf-8")
+        self.assertFalse(film.plan_film(self.dir).compatible)  # the plain film would refuse
+        montage.save(self.dir, {**PLAIN, "grain": 2, "render": {"encoder": "x264"}})
+        result = montage.make_montage_film(self.dir, FFMPEG, log=lambda _: None)
+        self.assertEqual(result.mode, "copy")
+        self.assertAlmostEqual(mp4.duration_seconds(result.path), 12 + 8, delta=0.3)
+        self.assertEqual((mp4.probe(result.path).video.width, mp4.probe(result.path).video.height), (216, 384))
